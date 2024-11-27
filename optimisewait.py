@@ -1,20 +1,18 @@
 import pyautogui
 from time import sleep
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=r'D:\BobaDays\Auto', orfiles=None, orclicks=None):
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=r'D:\BobaDays\Auto'):
     if not isinstance(filename, list):
         filename = [filename]
-    if orfiles and not isinstance(orfiles, list):
-        orfiles = [orfiles]
-    if orclicks and not isinstance(orclicks, list):
-        orclicks = [orclicks]
-    if orfiles and not orclicks:
-        orclicks = [1] * len(orfiles)
+    if not isinstance(clicks, list):
+        clicks = [clicks] + [1] * (len(filename) - 1)
+    elif len(clicks) < len(filename):
+        clicks = clicks + [1] * (len(filename) - len(clicks))
 
     clicked = 0
     while True:
         findloc = None
-        for i, fname in enumerate([*filename, *(orfiles or [])]):
+        for i, fname in enumerate(filename):
             try:
                 if specreg is None:
                     loc = pyautogui.locateCenterOnScreen(fr'{autopath}\{fname}.png', confidence=0.9)
@@ -34,11 +32,9 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 break
         else:
             if not findloc:
-                print('dontwait: image not found')
-                break
+                return {'found': False, 'image': None}
             else:
-                print('dontwait: image found')
-                break
+                return {'found': True, 'image': filename[clicked - 1]}
         sleep(1)
 
     if findloc is not None:
@@ -50,9 +46,12 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         ymod = y + yoff
         sleep(1)
 
-        click_count = clicks if clicked == 1 else orclicks[clicked-2] if clicked > 1 else 0
+        click_count = clicks[clicked - 1] if clicked > 0 else 0
         if click_count > 0:
             for _ in range(click_count):
                 pyautogui.click(xmod, ymod)
                 sleep(0.1)
-            print('clicked')
+        
+        return {'found': True, 'image': filename[clicked - 1]}
+    
+    return {'found': False, 'image': None}

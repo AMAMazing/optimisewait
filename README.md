@@ -4,12 +4,12 @@ A Python utility function for automated image detection and clicking using PyAut
 
 ## Installation
 
-Requires PyAutoGUI:
 ```bash
-pip install pyautogui
+# Install from PyPI
+pip install optimisewait
 ```
 
-## Usage
+## Quick Start
 
 ```python
 from optimisewait import optimiseWait, set_autopath
@@ -20,7 +20,11 @@ set_autopath(r'D:\Images')
 # Basic usage - wait for image and click
 result = optimiseWait('button')  # Looks for button.png in D:\Images
 # Returns {'found': True, 'image': 'button'} if found
+```
 
+## Usage Examples
+
+```python
 # Override default path for specific call
 result = optimiseWait('button', autopath=r'D:\OtherImages')
 
@@ -79,3 +83,11 @@ Returns a dictionary with:
 - If clicks is a list shorter than filename list, remaining images default to 1 click
 - Click offsets are calculated from the center of the found image
 - Default image path can be set once using set_autopath() and reused across multiple calls
+
+## Dependencies
+
+- PyAutoGUI >= 0.9.53
+
+## License
+
+MIT License

@@ -12,11 +12,17 @@ pip install pyautogui
 ## Usage
 
 ```python
-from optimisewait import optimiseWait
+from optimisewait import optimiseWait, set_autopath
+
+# Set default path for all subsequent optimiseWait calls
+set_autopath(r'D:\Images')
 
 # Basic usage - wait for image and click
-result = optimiseWait('button')  # Looks for button.png
+result = optimiseWait('button')  # Looks for button.png in D:\Images
 # Returns {'found': True, 'image': 'button'} if found
+
+# Override default path for specific call
+result = optimiseWait('button', autopath=r'D:\OtherImages')
 
 # Don't wait for image (check if image exists)
 result = optimiseWait('button', dontwait=True)
@@ -36,10 +42,16 @@ optimiseWait(['button', 'alt1', 'alt2'], clicks=[2, 3, 1])  # Different clicks p
 
 # Offset clicking
 optimiseWait('button', xoff=10, yoff=20)  # Click 10px right, 20px down from center
-
-# Custom image path
-optimiseWait('button', autopath=r'D:\Images')  # Look in D:\Images for button.png
 ```
+
+## Functions
+
+### set_autopath(path)
+Sets the default path for image files that will be used by all subsequent optimiseWait calls.
+- `path`: String. Directory path where image files are located.
+
+### optimiseWait(filename, ...)
+Main function for image detection and clicking.
 
 ## Parameters
 
@@ -49,7 +61,7 @@ optimiseWait('button', autopath=r'D:\Images')  # Look in D:\Images for button.pn
 - `clicks`: Integer or list (default 1). Number of clicks per image (0 = no click, 1 = single, 2 = double, 3 = triple)
 - `xoff`: Integer (default 0). X offset from center for clicking
 - `yoff`: Integer (default 0). Y offset from center for clicking
-- `autopath`: String (default 'D:\BobaDays\Auto'). Directory containing image files
+- `autopath`: String (optional). Directory containing image files. If not provided, uses path set by set_autopath()
 
 ## Return Value
 
@@ -66,3 +78,4 @@ Returns a dictionary with:
 - If clicks is a single integer, it applies to the first found image (others default to 1 click)
 - If clicks is a list shorter than filename list, remaining images default to 1 click
 - Click offsets are calculated from the center of the found image
+- Default image path can be set once using set_autopath() and reused across multiple calls

@@ -1,7 +1,16 @@
 import pyautogui
 from time import sleep
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=r'D:\BobaDays\Auto'):
+_default_autopath = r'C:\\'
+
+def set_autopath(path):
+    global _default_autopath
+    _default_autopath = path
+
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None):
+    global _default_autopath
+    autopath = autopath if autopath is not None else _default_autopath
+
     if not isinstance(filename, list):
         filename = [filename]
     if not isinstance(clicks, list):

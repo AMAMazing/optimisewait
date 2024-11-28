@@ -7,6 +7,11 @@ A Python utility function for automated image detection and clicking using PyAut
 ```bash
 # Install from PyPI
 pip install optimisewait
+
+# Or install from source
+git clone https://github.com/AMAMazing/optimisewait.git
+cd optimisewait
+pip install .
 ```
 
 ## Quick Start
@@ -44,8 +49,15 @@ result = optimiseWait(['button', 'alt1', 'alt2'])  # Will click first image foun
 # Different clicks per image
 optimiseWait(['button', 'alt1', 'alt2'], clicks=[2, 3, 1])  # Different clicks per image
 
-# Offset clicking
+# Offset clicking - single value
 optimiseWait('button', xoff=10, yoff=20)  # Click 10px right, 20px down from center
+
+# Offset clicking - multiple values for different images
+optimiseWait(['button1', 'button2'], xoff=[10, 20], yoff=[5, 15])  # Different offsets per image
+optimiseWait(['button1', 'button2', 'button3'], xoff=[10, 20])  # Remaining offsets default to 0
+
+# Custom image path
+optimiseWait('button', autopath=r'D:\Images')  # Look in D:\Images for button.png
 ```
 
 ## Functions
@@ -63,8 +75,8 @@ Main function for image detection and clicking.
 - `dontwait`: Boolean (default False). If True, don't wait for image to appear
 - `specreg`: Tuple (default None). Specific region to search in (x, y, width, height)
 - `clicks`: Integer or list (default 1). Number of clicks per image (0 = no click, 1 = single, 2 = double, 3 = triple)
-- `xoff`: Integer (default 0). X offset from center for clicking
-- `yoff`: Integer (default 0). Y offset from center for clicking
+- `xoff`: Integer or list (default 0). X offset from center for clicking. Can be different for each image
+- `yoff`: Integer or list (default 0). Y offset from center for clicking. Can be different for each image
 - `autopath`: String (optional). Directory containing image files. If not provided, uses path set by set_autopath()
 
 ## Return Value
@@ -81,6 +93,8 @@ Returns a dictionary with:
 - When using multiple images, it will try each in order until one is found
 - If clicks is a single integer, it applies to the first found image (others default to 1 click)
 - If clicks is a list shorter than filename list, remaining images default to 1 click
+- If xoff/yoff are single integers, same offset applies to all images
+- If xoff/yoff are lists shorter than filename list, remaining offsets default to 0
 - Click offsets are calculated from the center of the found image
 - Default image path can be set once using set_autopath() and reused across multiple calls
 

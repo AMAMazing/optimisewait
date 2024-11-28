@@ -17,6 +17,16 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         clicks = [clicks] + [1] * (len(filename) - 1)
     elif len(clicks) < len(filename):
         clicks = clicks + [1] * (len(filename) - len(clicks))
+    
+    if not isinstance(xoff, list):
+        xoff = [xoff] * len(filename)
+    elif len(xoff) < len(filename):
+        xoff = xoff + [0] * (len(filename) - len(xoff))
+        
+    if not isinstance(yoff, list):
+        yoff = [yoff] * len(filename)
+    elif len(yoff) < len(filename):
+        yoff = yoff + [0] * (len(filename) - len(yoff))
 
     clicked = 0
     while True:
@@ -51,8 +61,11 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             x, y = findloc
         else:
             x, y, width, height = findloc
-        xmod = x + xoff
-        ymod = y + yoff
+        
+        current_xoff = xoff[clicked - 1] if clicked > 0 else 0
+        current_yoff = yoff[clicked - 1] if clicked > 0 else 0
+        xmod = x + current_xoff
+        ymod = y + current_yoff
         sleep(1)
 
         click_count = clicks[clicked - 1] if clicked > 0 else 0

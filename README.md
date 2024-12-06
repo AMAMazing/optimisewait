@@ -17,13 +17,16 @@ pip install .
 ## Quick Start
 
 ```python
-from optimisewait import optimiseWait, set_autopath
+from optimisewait import optimiseWait, set_autopath, set_altpath
 
 # Set default path for all subsequent optimiseWait calls
 set_autopath(r'D:\Images')
 
+# Optional: Set an alternative path for fallback image search
+set_altpath(r'D:\Images\Alt')
+
 # Basic usage - wait for image and click
-result = optimiseWait('button')  # Looks for button.png in D:\Images
+result = optimiseWait('button')  # Looks for button.png in D:\Images, then D:\Images\Alt if not found
 # Returns {'found': True, 'image': 'button'} if found
 ```
 
@@ -32,6 +35,9 @@ result = optimiseWait('button')  # Looks for button.png in D:\Images
 ```python
 # Override default path for specific call
 result = optimiseWait('button', autopath=r'D:\OtherImages')
+
+# Specify both main and alternative paths for specific call
+result = optimiseWait('button', autopath=r'D:\Images', altpath=r'D:\Images\Alt')
 
 # Don't wait for image (check if image exists)
 result = optimiseWait('button', dontwait=True)
@@ -55,9 +61,6 @@ optimiseWait('button', xoff=10, yoff=20)  # Click 10px right, 20px down from cen
 # Offset clicking - multiple values for different images
 optimiseWait(['button1', 'button2'], xoff=[10, 20], yoff=[5, 15])  # Different offsets per image
 optimiseWait(['button1', 'button2', 'button3'], xoff=[10, 20])  # Remaining offsets default to 0
-
-# Custom image path
-optimiseWait('button', autopath=r'D:\Images')  # Look in D:\Images for button.png
 ```
 
 ## Functions
@@ -65,6 +68,10 @@ optimiseWait('button', autopath=r'D:\Images')  # Look in D:\Images for button.pn
 ### set_autopath(path)
 Sets the default path for image files that will be used by all subsequent optimiseWait calls.
 - `path`: String. Directory path where image files are located.
+
+### set_altpath(path)
+Sets the default alternative path for image files. If an image is not found in the main path, it will be searched for in this alternative path.
+- `path`: String. Directory path for alternative image files location.
 
 ### optimiseWait(filename, ...)
 Main function for image detection and clicking.
@@ -78,6 +85,7 @@ Main function for image detection and clicking.
 - `xoff`: Integer or list (default 0). X offset from center for clicking. Can be different for each image
 - `yoff`: Integer or list (default 0). Y offset from center for clicking. Can be different for each image
 - `autopath`: String (optional). Directory containing image files. If not provided, uses path set by set_autopath()
+- `altpath`: String (optional). Alternative directory for image files. If an image is not found in autopath, it will be searched for here. If not provided, uses path set by set_altpath()
 
 ## Return Value
 
@@ -91,12 +99,13 @@ Returns a dictionary with:
 - Images are searched with 90% confidence level
 - Function will wait indefinitely until image is found (unless dontwait=True)
 - When using multiple images, it will try each in order until one is found
+- Images are first searched in the main path (autopath), then in the alternative path (altpath) if not found
 - If clicks is a single integer, it applies to the first found image (others default to 1 click)
 - If clicks is a list shorter than filename list, remaining images default to 1 click
 - If xoff/yoff are single integers, same offset applies to all images
 - If xoff/yoff are lists shorter than filename list, remaining offsets default to 0
 - Click offsets are calculated from the center of the found image
-- Default image path can be set once using set_autopath() and reused across multiple calls
+- Default image paths can be set once using set_autopath() and set_altpath() and reused across multiple calls
 
 ## Dependencies
 

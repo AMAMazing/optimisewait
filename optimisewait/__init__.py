@@ -2,14 +2,20 @@ import pyautogui
 from time import sleep
 
 _default_autopath = r'C:\\'
+_default_altpath = None
 
 def set_autopath(path):
     global _default_autopath
     _default_autopath = path
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None):
-    global _default_autopath
+def set_altpath(path):
+    global _default_altpath
+    _default_altpath = path
+
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None):
+    global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
+    altpath = altpath if altpath is not None else _default_altpath
 
     if not isinstance(filename, list):
         filename = [filename]
@@ -31,20 +37,39 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     clicked = 0
     while True:
         findloc = None
+        found_in_alt = False
+        
         for i, fname in enumerate(filename):
+            # Try main path first
             try:
                 if specreg is None:
                     loc = pyautogui.locateCenterOnScreen(fr'{autopath}\{fname}.png', confidence=0.9)
+                else:
+                    loc = pyautogui.locateOnScreen(fr'{autopath}\{fname}.png', region=specreg, confidence=0.9)
+                
+                if loc and clicked == 0:
+                    findloc = loc
+                    clicked = i + 1
+                    found_in_alt = False
+                    break
+            except pyautogui.ImageNotFoundException:
+                pass
+            
+            # Try alt path if provided and image wasn't found in main path
+            if altpath and not findloc:
+                try:
+                    if specreg is None:
+                        loc = pyautogui.locateCenterOnScreen(fr'{altpath}\{fname}.png', confidence=0.9)
+                    else:
+                        loc = pyautogui.locateOnScreen(fr'{altpath}\{fname}.png', region=specreg, confidence=0.9)
+                    
                     if loc and clicked == 0:
                         findloc = loc
                         clicked = i + 1
-                else:
-                    loc = pyautogui.locateOnScreen(fr'{autopath}\{fname}.png', region=specreg, confidence=0.9)
-                    if loc:
-                        findloc = loc
-                        clicked = i + 1
-            except pyautogui.ImageNotFoundException:
-                continue
+                        found_in_alt = True
+                        break
+                except pyautogui.ImageNotFoundException:
+                    continue
 
         if dontwait is False:
             if findloc:

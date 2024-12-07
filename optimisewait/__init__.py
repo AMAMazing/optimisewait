@@ -15,7 +15,8 @@ def set_altpath(path):
 def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None):
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
-    altpath = altpath if altpath is not None else _default_altpath
+    # Only use default altpath if altpath parameter is not provided (vs being explicitly None)
+    altpath = _default_altpath if altpath is None and 'altpath' not in locals() else altpath
 
     if not isinstance(filename, list):
         filename = [filename]
@@ -56,7 +57,7 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 pass
             
             # Try alt path if provided and image wasn't found in main path
-            if altpath and not findloc:
+            if altpath is not None and not findloc:
                 try:
                     if specreg is None:
                         loc = pyautogui.locateCenterOnScreen(fr'{altpath}\{fname}.png', confidence=0.9)

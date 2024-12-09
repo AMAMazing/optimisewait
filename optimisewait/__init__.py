@@ -72,6 +72,24 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 except pyautogui.ImageNotFoundException:
                     continue
 
+        if findloc is not None:
+            if specreg is None:
+                x, y = findloc
+            else:
+                x, y, width, height = findloc
+            
+            current_xoff = xoff[clicked - 1] if clicked > 0 else 0
+            current_yoff = yoff[clicked - 1] if clicked > 0 else 0
+            xmod = x + current_xoff
+            ymod = y + current_yoff
+            sleep(1)
+
+            click_count = clicks[clicked - 1] if clicked > 0 else 0
+            if click_count > 0:
+                for _ in range(click_count):
+                    pyautogui.click(xmod, ymod)
+                    sleep(0.1)
+
         if dontwait is False:
             if findloc:
                 break
@@ -81,25 +99,5 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             else:
                 return {'found': True, 'image': filename[clicked - 1]}
         sleep(1)
-
-    if findloc is not None:
-        if specreg is None:
-            x, y = findloc
-        else:
-            x, y, width, height = findloc
-        
-        current_xoff = xoff[clicked - 1] if clicked > 0 else 0
-        current_yoff = yoff[clicked - 1] if clicked > 0 else 0
-        xmod = x + current_xoff
-        ymod = y + current_yoff
-        sleep(1)
-
-        click_count = clicks[clicked - 1] if clicked > 0 else 0
-        if click_count > 0:
-            for _ in range(click_count):
-                pyautogui.click(xmod, ymod)
-                sleep(0.1)
-        
-        return {'found': True, 'image': filename[clicked - 1]}
     
-    return {'found': False, 'image': None}
+    return {'found': True, 'image': filename[clicked - 1]} if findloc is not None else {'found': False, 'image': None}

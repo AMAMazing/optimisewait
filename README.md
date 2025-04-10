@@ -1,5 +1,8 @@
 # OptimiseWait
 
+[![PyPI version](https://badge.fury.io/py/optimisewait.svg)](https://badge.fury.io/py/optimisewait)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A Python utility function for automated image detection and clicking using PyAutoGUI.
 
 ## Installation

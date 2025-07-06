@@ -12,15 +12,10 @@ def set_altpath(path):
     global _default_altpath
     _default_altpath = path
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None): # Added scrolltofind
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None):
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
-    # Only use default altpath if altpath parameter is not provided (vs being explicitly None)
-    # Note: This line's original logic for using _default_altpath might not behave as the comment suggests.
-    # It currently effectively means _default_altpath is not used unless explicitly passed as the altpath argument.
-    # Kept as-is to preserve existing behavior.
     altpath = _default_altpath if altpath is None and 'altpath' not in locals() else altpath
-
 
     if not isinstance(filename, list):
         filename = [filename]
@@ -39,91 +34,98 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     elif len(yoff) < len(filename):
         yoff = yoff + [0] * (len(filename) - len(yoff))
 
-    clicked = 0
     while True:
-        findloc = None
-        found_in_alt = False # This variable is set but not used elsewhere in the original code. Kept as is.
+        images_found = []  # Track all found images this iteration
         
         for i, fname in enumerate(filename):
+            findloc = None
+            found_in_alt = False
+            
             # Try main path first
             try:
-                if specreg is None:
-                    loc = pyautogui.locateCenterOnScreen(fr'{autopath}\{fname}.png', confidence=0.9)
-                else:
-                    loc = pyautogui.locateOnScreen(fr'{autopath}\{fname}.png', region=specreg, confidence=0.9)
-                
-                if loc and clicked == 0: # ensure we only mark the first found image
-                    findloc = loc
-                    clicked = i + 1
-                    found_in_alt = False
-                    break
-            except pyautogui.ImageNotFoundException:
+                # Check if file exists before trying to locate it
+                import os
+                main_path = fr'{autopath}\{fname}.png'
+                if os.path.exists(main_path):
+                    if specreg is None:
+                        loc = pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
+                    else:
+                        loc = pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
+                    
+                    if loc:
+                        findloc = loc
+                        found_in_alt = False
+            except (pyautogui.ImageNotFoundException, FileNotFoundError):
                 pass
             
             # Try alt path if provided and image wasn't found in main path
-            if altpath is not None and not findloc: # Check not findloc to ensure main path was fully checked for this fname
+            if altpath is not None and not findloc:
                 try:
-                    if specreg is None:
-                        loc = pyautogui.locateCenterOnScreen(fr'{altpath}\{fname}.png', confidence=0.9)
-                    else:
-                        loc = pyautogui.locateOnScreen(fr'{altpath}\{fname}.png', region=specreg, confidence=0.9)
-                    
-                    if loc and clicked == 0: # ensure we only mark the first found image
-                        findloc = loc
-                        clicked = i + 1
-                        found_in_alt = True
-                        break
-                except pyautogui.ImageNotFoundException:
-                    continue # To the next filename
+                    alt_path = fr'{altpath}\{fname}.png'
+                    if os.path.exists(alt_path):
+                        if specreg is None:
+                            loc = pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
+                        else:
+                            loc = pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
+                        
+                        if loc:
+                            findloc = loc
+                            found_in_alt = True
+                except (pyautogui.ImageNotFoundException, FileNotFoundError):
+                    continue
 
-        if findloc is not None:
-            # Note: Original click logic for specreg might not align with "offset from center" if specreg is used,
-            # as x,y would be top-left. Kept as-is.
+            # If we found this image, add it to our found list
+            if findloc is not None:
+                images_found.append({
+                    'index': i,
+                    'filename': fname,
+                    'location': findloc,
+                    'found_in_alt': found_in_alt
+                })
+
+        # If we found at least one image, click on the first one found
+        if images_found:
+            # Use the first found image
+            first_found = images_found[0]
+            findloc = first_found['location']
+            clicked_index = first_found['index']
+            
+            # Click logic
             if specreg is None:
                 x, y = findloc
             else:
-                x, y, width, height = findloc # x, y are top-left
+                x, y, width, height = findloc
             
-            current_xoff = xoff[clicked - 1] if clicked > 0 else 0
-            current_yoff = yoff[clicked - 1] if clicked > 0 else 0
+            current_xoff = xoff[clicked_index]
+            current_yoff = yoff[clicked_index]
             xmod = x + current_xoff
             ymod = y + current_yoff
-            sleep(1) # Pre-click delay
+            sleep(1)  # Pre-click delay
 
-            click_count = clicks[clicked - 1] if clicked > 0 else 0
+            click_count = clicks[clicked_index]
             if click_count > 0:
                 for _ in range(click_count):
                     pyautogui.click(xmod, ymod)
-                    sleep(0.1) # Inter-click delay
+                    sleep(0.1)  # Inter-click delay
 
-        # Loop control, return, or wait/scroll logic
+        # Loop control logic
         if dontwait is False:
-            if findloc: # Image found, and we are in "wait" mode (dontwait=False)
-                break   # Exit the while True loop, success will be returned after the loop
-            else: # Image not found (findloc is None), and we are in "wait" mode (dontwait=False)
+            if images_found:  # At least one image found, exit the loop
+                break
+            else:  # No images found, continue searching
                 # Attempt to scroll if enabled
                 if scrolltofind == 'pageup':
                     pyautogui.press('pageup')
-                    sleep(0.5) # Allow screen to update and action to complete
+                    sleep(0.5)
                 elif scrolltofind == 'pagedown':
                     pyautogui.press('pagedown')
-                    sleep(0.5) # Allow screen to update and action to complete
-                # If scrolltofind is None or an invalid value, no scrolling happens here.
-                # The loop will continue, and the sleep(1) below will provide the pause.
-        else: # dontwait is True
-            # This block is executed if dontwait is True.
-            # It determines whether to return based on whether the image was found on this single pass.
-            # Scrolling does not occur if dontwait is True.
-            if not findloc:
+                    sleep(0.5)
+                sleep(1)  # Wait before next attempt
+        else:  # dontwait is True
+            if not images_found:
                 return {'found': False, 'image': None}
-            else: # findloc is not None
-                return {'found': True, 'image': filename[clicked - 1]}
-        
-        # This sleep executes if `dontwait` is False and the image was not found (`findloc` is None in this iteration),
-        # causing the loop to pause before the next attempt.
-        # If `findloc` was True (and `dontwait` was False), `break` would have been hit, skipping this.
-        # If `dontwait` was True, a return would have happened, skipping this.
-        sleep(1) 
+            else:
+                return {'found': True, 'image': images_found[0]['filename']}
     
-    # This return is reached only if dontwait=False and the loop was broken (image found)
-    return {'found': True, 'image': filename[clicked - 1]} if findloc is not None else {'found': False, 'image': None}
+    # This return is reached only if dontwait=False and at least one image was found
+    return {'found': True, 'image': images_found[0]['filename']} if images_found else {'found': False, 'image': None}

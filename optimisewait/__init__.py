@@ -168,8 +168,8 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
 
             # Perform clicks if count > 0
             click_count = clicks[found_index]
+            pyautogui.moveTo(xmod, ymod)
             if click_count > 0:
-                pyautogui.moveTo(xmod, ymod)
                 for _ in range(click_count):
                     pyautogui.click()
                     sleep(clickdelay)

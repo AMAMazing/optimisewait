@@ -12,7 +12,7 @@ def set_altpath(path):
     global _default_altpath
     _default_altpath = path
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None):
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1):
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
     altpath = _default_altpath if altpath is None and 'altpath' not in locals() else altpath
@@ -105,8 +105,8 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             click_count = clicks[clicked_index]
             if click_count > 0:
                 for _ in range(click_count):
+                    sleep(clickdelay)  # Inter-click delay
                     pyautogui.click(xmod, ymod)
-                    sleep(0.1)  # Inter-click delay
 
         # Loop control logic
         if dontwait is False:

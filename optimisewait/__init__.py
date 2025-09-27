@@ -1,26 +1,100 @@
 import pyautogui
 from time import sleep
+import os
 
+# --- Global Default Paths ---
 _default_autopath = r'C:\\'
 _default_altpath = None
 
 def set_autopath(path):
+    """Sets the global default primary path for image assets."""
     global _default_autopath
     _default_autopath = path
 
 def set_altpath(path):
+    """Sets the global default alternative/fallback path for image assets."""
     global _default_altpath
     _default_altpath = path
 
 def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1):
+    """
+    Waits for one of several possible images to appear on screen and optionally clicks it.
+
+    This function repeatedly scans the screen for a list of images. It will act
+    on the first image it finds in the list's order. It is highly configurable,
+    allowing for different click counts, click offsets, and search paths for each
+    image, as well as fallback behaviors like scrolling.
+
+    Args:
+        filename (str or list[str]): The name(s) of the image file(s) to find,
+            without the '.png' extension. If a list is provided, images are
+            searched for in that order. The first one found is used.
+
+        dontwait (bool, optional): Controls the waiting behavior.
+            - False (default): The function will loop indefinitely until an image
+              is found.
+            - True: The function will perform a single search and return
+              immediately, whether an image was found or not.
+
+        specreg (tuple, optional): A specific region on the screen to search within,
+            defined as a tuple (left, top, width, height). If None (default),
+            the entire screen is searched. Searching a smaller region is
+            significantly faster.
+
+        clicks (int or list[int], optional): The number of times to click the
+            found image. Defaults to 1.
+            - int: The specified number of clicks is applied to whichever image
+              is found (e.g., `clicks=0` finds but doesn't click; `clicks=3`
+              clicks the found image 3 times).
+            - list[int]: Assigns a specific click count to each image in
+              `filename` by index. If the list is shorter than `filename`, the
+              remaining images will default to 1 click (e.g., for 3 filenames,
+              `clicks=[2, 0]` means the first gets 2 clicks, the second gets 0,
+              and the third defaults to 1).
+
+        xoff (int or list[int], optional): Horizontal offset in pixels to apply
+            to the click coordinate, relative to the center of the found image.
+            A positive value moves the click right, negative moves it left.
+            Accepts a single integer to apply to all images or a list to
+            specify an offset for each. Defaults to 0.
+
+        yoff (int or list[int], optional): Vertical offset in pixels to apply to
+            the click coordinate. A positive value moves the click down,
+            negative moves it up. Accepts a single integer or a list.
+            Defaults to 0.
+
+        autopath (str, optional): The primary directory path to search for the
+            image files. If None (default), uses the global `_default_autopath`.
+
+        altpath (str, optional): A secondary, fallback directory path. If an
+            image is not found in `autopath`, this directory will be checked.
+            If None (default), uses the global `_default_altpath`.
+
+        scrolltofind (str, optional): If no images are found in a search loop,
+            this action can be performed to reveal more of the screen.
+            Accepts 'pageup' or 'pagedown'. If None (default), no scrolling occurs.
+            This only has an effect when `dontwait=False`.
+
+        clickdelay (float, optional): The delay in seconds between multiple
+            clicks when `clicks` is greater than 1. Defaults to 0.1.
+
+    Returns:
+        dict: A dictionary containing the results of the search.
+            - 'found' (bool): True if an image was found, otherwise False.
+            - 'image' (str or None): The filename of the found image.
+            - 'location' (pyautogui.Point or pyautogui.Box or None): The location
+              of the found image on the screen.
+    """
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
-    altpath = _default_altpath if altpath is None and 'altpath' not in locals() else altpath
+    altpath = altpath if altpath is not None else _default_altpath
 
+    # --- Parameter Normalization ---
     if not isinstance(filename, list):
         filename = [filename]
+
     if not isinstance(clicks, list):
-        clicks = [clicks] + [1] * (len(filename) - 1)
+        clicks = [clicks] * len(filename)
     elif len(clicks) < len(filename):
         clicks = clicks + [1] * (len(filename) - len(clicks))
     
@@ -34,32 +108,27 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     elif len(yoff) < len(filename):
         yoff = yoff + [0] * (len(filename) - len(yoff))
 
+    # --- Main Loop ---
     while True:
-        images_found = []  # Track all found images this iteration
+        first_found_image = None
         
         for i, fname in enumerate(filename):
             findloc = None
-            found_in_alt = False
             
             # Try main path first
             try:
-                # Check if file exists before trying to locate it
-                import os
                 main_path = fr'{autopath}\{fname}.png'
                 if os.path.exists(main_path):
                     if specreg is None:
                         loc = pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
                     else:
                         loc = pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
-                    
-                    if loc:
-                        findloc = loc
-                        found_in_alt = False
+                    if loc: findloc = loc
             except (pyautogui.ImageNotFoundException, FileNotFoundError):
                 pass
             
-            # Try alt path if provided and image wasn't found in main path
-            if altpath is not None and not findloc:
+            # Try alt path if not found in main
+            if findloc is None and altpath is not None:
                 try:
                     alt_path = fr'{altpath}\{fname}.png'
                     if os.path.exists(alt_path):
@@ -67,65 +136,56 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                             loc = pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
                         else:
                             loc = pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
-                        
-                        if loc:
-                            findloc = loc
-                            found_in_alt = True
+                        if loc: findloc = loc
                 except (pyautogui.ImageNotFoundException, FileNotFoundError):
-                    continue
+                    pass
 
-            # If we found this image, add it to our found list
+            # If found, store it and break the inner loop to prioritize this image
             if findloc is not None:
-                images_found.append({
+                first_found_image = {
                     'index': i,
                     'filename': fname,
                     'location': findloc,
-                    'found_in_alt': found_in_alt
-                })
+                }
+                break # Exit the for loop over filenames
 
-        # If we found at least one image, click on the first one found
-        if images_found:
-            # Use the first found image
-            first_found = images_found[0]
-            findloc = first_found['location']
-            clicked_index = first_found['index']
+        # --- Action Phase ---
+        if first_found_image:
+            loc = first_found_image['location']
+            found_index = first_found_image['index']
             
-            # Click logic
+            # Determine center coordinates for clicking
             if specreg is None:
-                x, y = findloc
+                x, y = loc # locateCenterOnScreen returns a Point(x, y)
             else:
-                x, y, width, height = findloc
+                # locateOnScreen returns a Box(left, top, width, height)
+                x = loc.left + loc.width / 2
+                y = loc.top + loc.height / 2
             
-            current_xoff = xoff[clicked_index]
-            current_yoff = yoff[clicked_index]
-            xmod = x + current_xoff
-            ymod = y + current_yoff
-            sleep(1)  # Pre-click delay
+            # Apply offsets
+            xmod = x + xoff[found_index]
+            ymod = y + yoff[found_index]
 
-            click_count = clicks[clicked_index]
+            # Perform clicks if count > 0
+            click_count = clicks[found_index]
             if click_count > 0:
+                pyautogui.moveTo(xmod, ymod)
                 for _ in range(click_count):
-                    sleep(clickdelay)  # Inter-click delay
-                    pyautogui.click(xmod, ymod)
+                    pyautogui.click()
+                    sleep(clickdelay)
+            
+            # Since we found and processed an image, return success
+            return {'found': True, 'image': first_found_image['filename'], 'location': loc}
 
-        # Loop control logic
-        if dontwait is False:
-            if images_found:  # At least one image found, exit the loop
-                break
-            else:  # No images found, continue searching
-                # Attempt to scroll if enabled
-                if scrolltofind == 'pageup':
-                    pyautogui.press('pageup')
-                    sleep(0.5)
-                elif scrolltofind == 'pagedown':
-                    pyautogui.press('pagedown')
-                    sleep(0.5)
-                sleep(1)  # Wait before next attempt
-        else:  # dontwait is True
-            if not images_found:
-                return {'found': False, 'image': None}
-            else:
-                return {'found': True, 'image': images_found[0]['filename']}
-    
-    # This return is reached only if dontwait=False and at least one image was found
-    return {'found': True, 'image': images_found[0]['filename']} if images_found else {'found': False, 'image': None}
+        # --- Loop Control ---
+        if dontwait:
+            return {'found': False, 'image': None, 'location': None}
+        else:
+            # If nothing was found, scroll if configured, then wait and retry
+            if scrolltofind == 'pageup':
+                pyautogui.press('pageup')
+                sleep(0.5)
+            elif scrolltofind == 'pagedown':
+                pyautogui.press('pagedown')
+                sleep(0.5)
+            sleep(1)

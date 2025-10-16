@@ -16,9 +16,39 @@ def set_altpath(path):
     global _default_altpath
     _default_altpath = path
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1):
+def _locate_image(fname, autopath, altpath, specreg=None):
+    """Internal helper to find an image, checking both primary and alt paths."""
+    # Try main path first
+    try:
+        main_path = os.path.join(autopath, f'{fname}.png')
+        if os.path.exists(main_path):
+            if specreg is None:
+                # Returns a Point(x, y) or None
+                return pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
+            else:
+                # Returns a Box(left, top, width, height) or None
+                return pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
+    except (pyautogui.ImageNotFoundException, FileNotFoundError):
+        pass
+
+    # Try alt path if not found in main and altpath is provided
+    if altpath is not None:
+        try:
+            alt_path = os.path.join(altpath, f'{fname}.png')
+            if os.path.exists(alt_path):
+                if specreg is None:
+                    return pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
+                else:
+                    return pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
+        except (pyautogui.ImageNotFoundException, FileNotFoundError):
+            pass
+            
+    return None
+
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None):
     """
     Waits for one of several possible images to appear on screen and optionally clicks it.
+    Can also handle and click 'interrupter' images that appear while waiting.
 
     This function repeatedly scans the screen for a list of images. It will act
     on the first image it finds in the list's order. It is highly configurable,
@@ -77,6 +107,12 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
 
         clickdelay (float, optional): The delay in seconds between multiple
             clicks when `clicks` is greater than 1. Defaults to 0.1.
+            
+        interrupter (str or list[str], optional): An image or list of images
+            to search for and click if the primary `filename` is not found
+            in a given loop. After clicking an interrupter, the function
+            continues to wait for the primary image instead of returning.
+            This is useful for handling unexpected pop-ups. Defaults to None.
 
     Returns:
         dict: A dictionary containing the results of the search.
@@ -90,81 +126,51 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     altpath = altpath if altpath is not None else _default_altpath
 
     # --- Parameter Normalization ---
-    if not isinstance(filename, list):
-        filename = [filename]
-
+    filenames = filename if isinstance(filename, list) else [filename]
+    
     if not isinstance(clicks, list):
-        clicks = [clicks] * len(filename)
-    elif len(clicks) < len(filename):
-        clicks = clicks + [1] * (len(filename) - len(clicks))
+        clicks = [clicks] * len(filenames)
+    elif len(clicks) < len(filenames):
+        clicks.extend([1] * (len(filenames) - len(clicks)))
     
     if not isinstance(xoff, list):
-        xoff = [xoff] * len(filename)
-    elif len(xoff) < len(filename):
-        xoff = xoff + [0] * (len(filename) - len(xoff))
+        xoff = [xoff] * len(filenames)
+    elif len(xoff) < len(filenames):
+        xoff.extend([0] * (len(filenames) - len(xoff)))
         
     if not isinstance(yoff, list):
-        yoff = [yoff] * len(filename)
-    elif len(yoff) < len(filename):
-        yoff = yoff + [0] * (len(filename) - len(yoff))
+        yoff = [yoff] * len(filenames)
+    elif len(yoff) < len(filenames):
+        yoff.extend([0] * (len(filenames) - len(yoff)))
 
     # --- Main Loop ---
     while True:
         first_found_image = None
         
-        for i, fname in enumerate(filename):
-            findloc = None
+        # 1. Search for the primary target images
+        for i, fname in enumerate(filenames):
+            findloc = _locate_image(fname, autopath, altpath, specreg)
             
-            # Try main path first
-            try:
-                main_path = fr'{autopath}\{fname}.png'
-                if os.path.exists(main_path):
-                    if specreg is None:
-                        loc = pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
-                    else:
-                        loc = pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
-                    if loc: findloc = loc
-            except (pyautogui.ImageNotFoundException, FileNotFoundError):
-                pass
-            
-            # Try alt path if not found in main
-            if findloc is None and altpath is not None:
-                try:
-                    alt_path = fr'{altpath}\{fname}.png'
-                    if os.path.exists(alt_path):
-                        if specreg is None:
-                            loc = pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
-                        else:
-                            loc = pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
-                        if loc: findloc = loc
-                except (pyautogui.ImageNotFoundException, FileNotFoundError):
-                    pass
-
-            # If found, store it and break the inner loop to prioritize this image
             if findloc is not None:
                 first_found_image = {
                     'index': i,
                     'filename': fname,
                     'location': findloc,
                 }
-                break # Exit the for loop over filenames
+                break # Prioritize first image in the list
 
-        # --- Action Phase ---
+        # 2. If a primary image was found, process and return
         if first_found_image:
             loc = first_found_image['location']
             found_index = first_found_image['index']
             
             # Determine center coordinates for clicking
-            if specreg is None:
-                x, y = loc # locateCenterOnScreen returns a Point(x, y)
-            else:
-                # locateOnScreen returns a Box(left, top, width, height)
-                x = loc.left + loc.width / 2
-                y = loc.top + loc.height / 2
+            # PyAutoGUI's center() works on both Point and Box objects
+            center_loc = pyautogui.center(loc)
             
             # Apply offsets
-            xmod = x + xoff[found_index]
-            ymod = y + yoff[found_index]
+            xmod = center_loc.x + xoff[found_index]
+            ymod = center_loc.y + yoff[found_index]
 
             # Perform clicks if count > 0
             click_count = clicks[found_index]
@@ -172,10 +178,20 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             if click_count > 0:
                 for _ in range(click_count):
                     pyautogui.click()
-                    sleep(clickdelay)
+                    if click_count > 1:
+                        sleep(clickdelay)
             
-            # Since we found and processed an image, return success
             return {'found': True, 'image': first_found_image['filename'], 'location': loc}
+
+        # 3. If NO primary image found, check for interrupters before waiting
+        if interrupter:
+            interrupter_list = interrupter if isinstance(interrupter, list) else [interrupter]
+            for inter_fname in interrupter_list:
+                inter_loc = _locate_image(inter_fname, autopath, altpath, specreg)
+                if inter_loc:
+                    pyautogui.click(inter_loc)
+                    sleep(0.3) # Brief pause after clicking the interrupter
+                    break # Handle one interrupter per cycle, then re-scan for primary
 
         # --- Loop Control ---
         if dontwait:

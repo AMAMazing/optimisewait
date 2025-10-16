@@ -67,6 +67,16 @@ optimiseWait(['user_icon', 'pass_icon'], xoff=[10, 20], yoff=[5, 15])
 # Scroll to find an image (when dontwait=False)
 # Scrolls pagedown repeatedly until 'image_far_down.png' is found
 result = optimiseWait('image_far_down', scrolltofind='pagedown')
+
+# Handle intermittent pop-ups while waiting
+# Waits for 'process_complete.png' to appear.
+# If 'accept_cookies.png' or 'close_ad.png' appears during the wait,
+# it will click them once and then continue waiting for the main image.
+optimiseWait(
+    'process_complete',
+    interrupter=['accept_cookies', 'close_ad'],
+    interrupter_once=True
+)
 ```
 
 ## Functions
@@ -95,6 +105,10 @@ The main function for finding an image on screen and interacting with it.
 - `autopath` (str, optional): Overrides the global default path for this specific call.
 - `altpath` (str, optional): Overrides the global alternative path for this specific call.
 - `scrolltofind` (str, optional): Can be `'pageup'` or `'pagedown'`. If an image isn't found, this key will be pressed before re-scanning. Only active when `dontwait=False`.
+- `clickdelay` (float, optional): The delay in seconds between multiple clicks when `clicks` is greater than 1. Defaults to 0.1.
+- `interrupter` (str or list[str], optional): An image (or list of images) to check for while waiting for the main `filename`. If an interrupter image is found, it is clicked, and the function continues waiting. This is useful for handling pop-ups or intermittent UI elements that might appear during a long wait.
+- `interrupterclicks` (int or list[int], default `1`): The number of clicks to perform on a found `interrupter` image. Behaves like the `clicks` parameter, accepting an integer for all interrupters or a list to specify clicks for each.
+- `interrupter_once` (bool, default `True`): If `True`, each interrupter image will only be clicked the *first* time it appears. If `False`, it will be clicked every time it's detected in the waiting loop.
 
 ## Return Value
 

@@ -16,39 +16,9 @@ def set_altpath(path):
     global _default_altpath
     _default_altpath = path
 
-def _locate_image(fname, autopath, altpath, specreg=None):
-    """Internal helper to find an image, checking both primary and alt paths."""
-    # Try main path first
-    try:
-        main_path = os.path.join(autopath, f'{fname}.png')
-        if os.path.exists(main_path):
-            if specreg is None:
-                # Returns a Point(x, y) or None
-                return pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
-            else:
-                # Returns a Box(left, top, width, height) or None
-                return pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
-    except (pyautogui.ImageNotFoundException, FileNotFoundError):
-        pass
-
-    # Try alt path if not found in main and altpath is provided
-    if altpath is not None:
-        try:
-            alt_path = os.path.join(altpath, f'{fname}.png')
-            if os.path.exists(alt_path):
-                if specreg is None:
-                    return pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
-                else:
-                    return pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
-        except (pyautogui.ImageNotFoundException, FileNotFoundError):
-            pass
-            
-    return None
-
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None):
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True):
     """
     Waits for one of several possible images to appear on screen and optionally clicks it.
-    Can also handle and click 'interrupter' images that appear while waiting.
 
     This function repeatedly scans the screen for a list of images. It will act
     on the first image it finds in the list's order. It is highly configurable,
@@ -107,12 +77,25 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
 
         clickdelay (float, optional): The delay in seconds between multiple
             clicks when `clicks` is greater than 1. Defaults to 0.1.
-            
-        interrupter (str or list[str], optional): An image or list of images
-            to search for and click if the primary `filename` is not found
-            in a given loop. After clicking an interrupter, the function
-            continues to wait for the primary image instead of returning.
-            This is useful for handling unexpected pop-ups. Defaults to None.
+
+        interrupter (str or list[str], optional): The name(s) of image file(s)
+            to check for while waiting for the main `filename` images. If any
+            interrupter image appears, it will be clicked according to
+            `interrupterclicks`, but the function will continue waiting for the
+            main images. If None (default), no interrupter checking occurs.
+
+        interrupterclicks (int or list[int], optional): The number of times to
+            click an interrupter image if found. Defaults to 1.
+            - int: Applied to all interrupter images.
+            - list[int]: Assigns a specific click count to each interrupter
+              image by index, with remaining images defaulting to 1 click.
+
+        interrupter_once (bool, optional): Controls whether interrupter images
+            are clicked only once or repeatedly. Defaults to True.
+            - True (default): Each interrupter image is clicked only the first
+              time it appears, then ignored for the remainder of the wait.
+            - False: Interrupter images are clicked every time they are detected
+              during the waiting loop.
 
     Returns:
         dict: A dictionary containing the results of the search.
@@ -126,51 +109,158 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     altpath = altpath if altpath is not None else _default_altpath
 
     # --- Parameter Normalization ---
-    filenames = filename if isinstance(filename, list) else [filename]
-    
+    if not isinstance(filename, list):
+        filename = [filename]
+
     if not isinstance(clicks, list):
-        clicks = [clicks] * len(filenames)
-    elif len(clicks) < len(filenames):
-        clicks.extend([1] * (len(filenames) - len(clicks)))
+        clicks = [clicks] * len(filename)
+    elif len(clicks) < len(filename):
+        clicks = clicks + [1] * (len(filename) - len(clicks))
     
     if not isinstance(xoff, list):
-        xoff = [xoff] * len(filenames)
-    elif len(xoff) < len(filenames):
-        xoff.extend([0] * (len(filenames) - len(xoff)))
+        xoff = [xoff] * len(filename)
+    elif len(xoff) < len(filename):
+        xoff = xoff + [0] * (len(filename) - len(xoff))
         
     if not isinstance(yoff, list):
-        yoff = [yoff] * len(filenames)
-    elif len(yoff) < len(filenames):
-        yoff.extend([0] * (len(filenames) - len(yoff)))
+        yoff = [yoff] * len(filename)
+    elif len(yoff) < len(filename):
+        yoff = yoff + [0] * (len(filename) - len(yoff))
+
+    # --- Interrupter Parameter Normalization ---
+    interrupter_list = None
+    interrupterclicks_list = None
+    clicked_interrupters = set()  # Track which interrupters have been clicked
+    
+    if interrupter is not None:
+        if not isinstance(interrupter, list):
+            interrupter_list = [interrupter]
+        else:
+            interrupter_list = interrupter
+        
+        if not isinstance(interrupterclicks, list):
+            interrupterclicks_list = [interrupterclicks] * len(interrupter_list)
+        elif len(interrupterclicks) < len(interrupter_list):
+            interrupterclicks_list = interrupterclicks + [1] * (len(interrupter_list) - len(interrupterclicks))
+        else:
+            interrupterclicks_list = interrupterclicks
 
     # --- Main Loop ---
     while True:
+        # --- Check for Interrupter Images ---
+        if interrupter_list is not None:
+            for i, int_fname in enumerate(interrupter_list):
+                # Skip if already clicked and interrupter_once is True
+                if interrupter_once and i in clicked_interrupters:
+                    continue
+                
+                int_findloc = None
+                
+                # Try main path first
+                try:
+                    main_path = fr'{autopath}\{int_fname}.png'
+                    if os.path.exists(main_path):
+                        if specreg is None:
+                            loc = pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
+                        else:
+                            loc = pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
+                        if loc: int_findloc = loc
+                except (pyautogui.ImageNotFoundException, FileNotFoundError):
+                    pass
+                
+                # Try alt path if not found in main
+                if int_findloc is None and altpath is not None:
+                    try:
+                        alt_path = fr'{altpath}\{int_fname}.png'
+                        if os.path.exists(alt_path):
+                            if specreg is None:
+                                loc = pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
+                            else:
+                                loc = pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
+                            if loc: int_findloc = loc
+                    except (pyautogui.ImageNotFoundException, FileNotFoundError):
+                        pass
+                
+                # If interrupter found, click it and continue waiting
+                if int_findloc is not None:
+                    # Determine center coordinates for clicking
+                    if specreg is None:
+                        x, y = int_findloc
+                    else:
+                        x = int_findloc.left + int_findloc.width / 2
+                        y = int_findloc.top + int_findloc.height / 2
+                    
+                    # Perform clicks
+                    int_click_count = interrupterclicks_list[i]
+                    pyautogui.moveTo(x, y)
+                    if int_click_count > 0:
+                        for _ in range(int_click_count):
+                            pyautogui.click()
+                            sleep(clickdelay)
+                    
+                    # Mark this interrupter as clicked
+                    if interrupter_once:
+                        clicked_interrupters.add(i)
+                    
+                    # Don't return, continue to check for main images
+                    break  # Exit interrupter loop to continue main flow
+
+        # --- Check for Main Images ---
         first_found_image = None
         
-        # 1. Search for the primary target images
-        for i, fname in enumerate(filenames):
-            findloc = _locate_image(fname, autopath, altpath, specreg)
+        for i, fname in enumerate(filename):
+            findloc = None
             
+            # Try main path first
+            try:
+                main_path = fr'{autopath}\{fname}.png'
+                if os.path.exists(main_path):
+                    if specreg is None:
+                        loc = pyautogui.locateCenterOnScreen(main_path, confidence=0.9)
+                    else:
+                        loc = pyautogui.locateOnScreen(main_path, region=specreg, confidence=0.9)
+                    if loc: findloc = loc
+            except (pyautogui.ImageNotFoundException, FileNotFoundError):
+                pass
+            
+            # Try alt path if not found in main
+            if findloc is None and altpath is not None:
+                try:
+                    alt_path = fr'{altpath}\{fname}.png'
+                    if os.path.exists(alt_path):
+                        if specreg is None:
+                            loc = pyautogui.locateCenterOnScreen(alt_path, confidence=0.9)
+                        else:
+                            loc = pyautogui.locateOnScreen(alt_path, region=specreg, confidence=0.9)
+                        if loc: findloc = loc
+                except (pyautogui.ImageNotFoundException, FileNotFoundError):
+                    pass
+
+            # If found, store it and break the inner loop to prioritize this image
             if findloc is not None:
                 first_found_image = {
                     'index': i,
                     'filename': fname,
                     'location': findloc,
                 }
-                break # Prioritize first image in the list
+                break # Exit the for loop over filenames
 
-        # 2. If a primary image was found, process and return
+        # --- Action Phase ---
         if first_found_image:
             loc = first_found_image['location']
             found_index = first_found_image['index']
             
             # Determine center coordinates for clicking
-            # PyAutoGUI's center() works on both Point and Box objects
-            center_loc = pyautogui.center(loc)
+            if specreg is None:
+                x, y = loc # locateCenterOnScreen returns a Point(x, y)
+            else:
+                # locateOnScreen returns a Box(left, top, width, height)
+                x = loc.left + loc.width / 2
+                y = loc.top + loc.height / 2
             
             # Apply offsets
-            xmod = center_loc.x + xoff[found_index]
-            ymod = center_loc.y + yoff[found_index]
+            xmod = x + xoff[found_index]
+            ymod = y + yoff[found_index]
 
             # Perform clicks if count > 0
             click_count = clicks[found_index]
@@ -178,20 +268,10 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             if click_count > 0:
                 for _ in range(click_count):
                     pyautogui.click()
-                    if click_count > 1:
-                        sleep(clickdelay)
+                    sleep(clickdelay)
             
+            # Since we found and processed an image, return success
             return {'found': True, 'image': first_found_image['filename'], 'location': loc}
-
-        # 3. If NO primary image found, check for interrupters before waiting
-        if interrupter:
-            interrupter_list = interrupter if isinstance(interrupter, list) else [interrupter]
-            for inter_fname in interrupter_list:
-                inter_loc = _locate_image(inter_fname, autopath, altpath, specreg)
-                if inter_loc:
-                    pyautogui.click(inter_loc)
-                    sleep(0.3) # Brief pause after clicking the interrupter
-                    break # Handle one interrupter per cycle, then re-scan for primary
 
         # --- Loop Control ---
         if dontwait:

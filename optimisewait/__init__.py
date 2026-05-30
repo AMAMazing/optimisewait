@@ -1,6 +1,7 @@
 import pyautogui
 from time import sleep
 import os
+import random
 
 # --- Global Default Paths ---
 _default_autopath = r'C:\\'
@@ -16,7 +17,7 @@ def set_altpath(path):
     global _default_altpath
     _default_altpath = path
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True):
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False):
     """
     Waits for one of several possible images to appear on screen and optionally clicks it.
 
@@ -96,6 +97,10 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
               time it appears, then ignored for the remainder of the wait.
             - False: Interrupter images are clicked every time they are detected
               during the waiting loop.
+              
+        humanize (bool, optional): If True, applies random offsets, randomized 
+            mouse movement durations, ease-in/ease-out curves, and jittered 
+            delays to simulate a human user. Defaults to False.
 
     Returns:
         dict: A dictionary containing the results of the search.
@@ -192,11 +197,29 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                     
                     # Perform clicks
                     int_click_count = interrupterclicks_list[i]
-                    pyautogui.moveTo(x, y)
+                    
+                    if humanize:
+                        # Add a tiny random offset to the target click
+                        hx = x + random.randint(-4, 4)
+                        hy = y + random.randint(-4, 4)
+                        # Glide mouse smoothly with randomized duration
+                        dur = random.uniform(0.2, 0.6)
+                        pyautogui.moveTo(hx, hy, duration=dur, tween=pyautogui.easeInOutQuad)
+                        
+                        # Micro-pause before clicking
+                        if int_click_count > 0:
+                            sleep(random.uniform(0.1, 0.3))
+                    else:
+                        pyautogui.moveTo(x, y)
+                        
                     if int_click_count > 0:
                         for _ in range(int_click_count):
                             pyautogui.click()
-                            sleep(clickdelay)
+                            if humanize:
+                                # Slightly randomize click delay
+                                sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
+                            else:
+                                sleep(clickdelay)
                     
                     # Mark this interrupter as clicked
                     if interrupter_once:
@@ -264,11 +287,28 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
 
             # Perform clicks if count > 0
             click_count = clicks[found_index]
-            pyautogui.moveTo(xmod, ymod)
+            
+            if humanize:
+                # Add a tiny random offset so it doesn't click the exact same pixel
+                hxmod = xmod + random.randint(-4, 4)
+                hymod = ymod + random.randint(-4, 4)
+                # Glide the mouse smoothly
+                dur = random.uniform(0.2, 0.6)
+                pyautogui.moveTo(hxmod, hymod, duration=dur, tween=pyautogui.easeInOutQuad)
+                
+                # Micro-pause before clicking (like humans visually verifying)
+                if click_count > 0:
+                    sleep(random.uniform(0.1, 0.3))
+            else:
+                pyautogui.moveTo(xmod, ymod)
+                
             if click_count > 0:
                 for _ in range(click_count):
                     pyautogui.click()
-                    sleep(clickdelay)
+                    if humanize:
+                        sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
+                    else:
+                        sleep(clickdelay)
             
             # Since we found and processed an image, return success
             return {'found': True, 'image': first_found_image['filename'], 'location': loc}
@@ -280,8 +320,9 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             # If nothing was found, scroll if configured, then wait and retry
             if scrolltofind == 'pageup':
                 pyautogui.press('pageup')
-                sleep(0.5)
+                sleep(random.uniform(0.4, 0.7) if humanize else 0.5)
             elif scrolltofind == 'pagedown':
                 pyautogui.press('pagedown')
-                sleep(0.5)
-            sleep(1)
+                sleep(random.uniform(0.4, 0.7) if humanize else 0.5)
+                
+            sleep(random.uniform(0.8, 1.2) if humanize else 1)

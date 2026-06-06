@@ -2,6 +2,7 @@ import pyautogui
 from time import sleep
 import os
 import random
+import math
 
 # --- Global Default Paths ---
 _default_autopath = r'C:\\'
@@ -16,6 +17,69 @@ def set_altpath(path):
     """Sets the global default alternative/fallback path for image assets."""
     global _default_altpath
     _default_altpath = path
+
+def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.004, max_wait=0.009, max_step=8, target_area=10):
+    """
+    Simulates human-like mouse movement using the WindMouse algorithm.
+    Tuned for a slower, more deliberate movement speed.
+    """
+    # Temporarily disable pyautogui's default pause to prevent the movement from stuttering heavily
+    original_pause = pyautogui.PAUSE
+    pyautogui.PAUSE = 0
+    
+    current_x, current_y = start_x, start_y
+    velo_x, velo_y = 0, 0
+    wind_x, wind_y = 0, 0
+    
+    try:
+        while True:
+            dist = math.hypot(dest_x - current_x, dest_y - current_y)
+            if dist < 1:
+                break
+                
+            # Randomly adjust wind to create wobble
+            if random.randint(1, 100) < 50:
+                wind_x = wind_x / math.sqrt(3) + (random.random() * (wind * 2 + 1) - wind) / math.sqrt(5)
+                wind_y = wind_y / math.sqrt(3) + (random.random() * (wind * 2 + 1) - wind) / math.sqrt(5)
+            
+            # Gravity pulls the mouse towards the destination
+            grav_x = (dest_x - current_x) * (gravity / max(dist, 1))
+            grav_y = (dest_y - current_y) * (gravity / max(dist, 1))
+            
+            # Apply forces to velocity
+            velo_x += grav_x + wind_x
+            velo_y += grav_y + wind_y
+            
+            # Limit the maximum step size (velocity magnitude)
+            velo_mag = math.hypot(velo_x, velo_y)
+            if velo_mag > max_step:
+                # Randomize the step slightly so speed isn't perfectly uniform
+                random_step = (max_step / 2) + random.random() * (max_step / 2)
+                velo_x = (velo_x / velo_mag) * random_step
+                velo_y = (velo_y / velo_mag) * random_step
+            
+            old_x, old_y = current_x, current_y
+            current_x += velo_x
+            current_y += velo_y
+            
+            new_px, new_py = int(round(current_x)), int(round(current_y))
+            
+            # Only issue a move command if the pixel coordinate actually changed
+            if new_px != int(round(old_x)) or new_py != int(round(old_y)):
+                pyautogui.moveTo(new_px, new_py)
+                sleep(random.uniform(min_wait, max_wait))
+            
+            # Slow down as the mouse approaches the target
+            if dist < target_area:
+                wind_x, wind_y = 0, 0
+                max_step = max_step * 0.6  # Apply brakes
+                
+        # Final exact snap to ensure it reaches the destination
+        pyautogui.moveTo(dest_x, dest_y)
+        
+    finally:
+        # Always restore original pause setting
+        pyautogui.PAUSE = original_pause
 
 def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False):
     """
@@ -155,7 +219,6 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         # --- Check for Interrupter Images ---
         if interrupter_list is not None:
             for i, int_fname in enumerate(interrupter_list):
-                # Skip if already clicked and interrupter_once is True
                 if interrupter_once and i in clicked_interrupters:
                     continue
                 
@@ -188,44 +251,39 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 
                 # If interrupter found, click it and continue waiting
                 if int_findloc is not None:
-                    # Determine center coordinates for clicking
                     if specreg is None:
                         x, y = int_findloc
                     else:
                         x = int_findloc.left + int_findloc.width / 2
                         y = int_findloc.top + int_findloc.height / 2
                     
-                    # Perform clicks
                     int_click_count = interrupterclicks_list[i]
                     
                     if humanize:
-                        # Add a tiny random offset to the target click
                         hx = x + random.randint(-4, 4)
                         hy = y + random.randint(-4, 4)
-                        # Glide mouse smoothly with randomized duration
-                        dur = random.uniform(0.2, 0.6)
-                        pyautogui.moveTo(hx, hy, duration=dur, tween=pyautogui.easeInOutQuad)
+                        start_x, start_y = pyautogui.position()
                         
-                        # Micro-pause before clicking
+                        # Use WindMouse for natural, curved traversal
+                        wind_mouse(start_x, start_y, hx, hy)
+                        
                         if int_click_count > 0:
                             sleep(random.uniform(0.1, 0.3))
                     else:
+                        # Original fast robotic movement
                         pyautogui.moveTo(x, y)
                         
                     if int_click_count > 0:
                         for _ in range(int_click_count):
                             pyautogui.click()
                             if humanize:
-                                # Slightly randomize click delay
                                 sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
                             else:
                                 sleep(clickdelay)
                     
-                    # Mark this interrupter as clicked
                     if interrupter_once:
                         clicked_interrupters.add(i)
                     
-                    # Don't return, continue to check for main images
                     break  # Exit interrupter loop to continue main flow
 
         # --- Check for Main Images ---
@@ -234,7 +292,6 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         for i, fname in enumerate(filename):
             findloc = None
             
-            # Try main path first
             try:
                 main_path = fr'{autopath}\{fname}.png'
                 if os.path.exists(main_path):
@@ -246,7 +303,6 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             except (pyautogui.ImageNotFoundException, FileNotFoundError):
                 pass
             
-            # Try alt path if not found in main
             if findloc is None and altpath is not None:
                 try:
                     alt_path = fr'{altpath}\{fname}.png'
@@ -259,47 +315,42 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 except (pyautogui.ImageNotFoundException, FileNotFoundError):
                     pass
 
-            # If found, store it and break the inner loop to prioritize this image
             if findloc is not None:
                 first_found_image = {
                     'index': i,
                     'filename': fname,
                     'location': findloc,
                 }
-                break # Exit the for loop over filenames
+                break
 
         # --- Action Phase ---
         if first_found_image:
             loc = first_found_image['location']
             found_index = first_found_image['index']
             
-            # Determine center coordinates for clicking
             if specreg is None:
-                x, y = loc # locateCenterOnScreen returns a Point(x, y)
+                x, y = loc 
             else:
-                # locateOnScreen returns a Box(left, top, width, height)
                 x = loc.left + loc.width / 2
                 y = loc.top + loc.height / 2
             
-            # Apply offsets
             xmod = x + xoff[found_index]
             ymod = y + yoff[found_index]
 
-            # Perform clicks if count > 0
             click_count = clicks[found_index]
             
             if humanize:
-                # Add a tiny random offset so it doesn't click the exact same pixel
                 hxmod = xmod + random.randint(-4, 4)
                 hymod = ymod + random.randint(-4, 4)
-                # Glide the mouse smoothly
-                dur = random.uniform(0.2, 0.6)
-                pyautogui.moveTo(hxmod, hymod, duration=dur, tween=pyautogui.easeInOutQuad)
+                start_x, start_y = pyautogui.position()
                 
-                # Micro-pause before clicking (like humans visually verifying)
+                # Use WindMouse for natural, curved traversal
+                wind_mouse(start_x, start_y, hxmod, hymod)
+                
                 if click_count > 0:
                     sleep(random.uniform(0.1, 0.3))
             else:
+                # Original fast robotic movement
                 pyautogui.moveTo(xmod, ymod)
                 
             if click_count > 0:
@@ -310,14 +361,12 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                     else:
                         sleep(clickdelay)
             
-            # Since we found and processed an image, return success
             return {'found': True, 'image': first_found_image['filename'], 'location': loc}
 
         # --- Loop Control ---
         if dontwait:
             return {'found': False, 'image': None, 'location': None}
         else:
-            # If nothing was found, scroll if configured, then wait and retry
             if scrolltofind == 'pageup':
                 pyautogui.press('pageup')
                 sleep(random.uniform(0.4, 0.7) if humanize else 0.5)

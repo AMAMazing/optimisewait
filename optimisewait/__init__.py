@@ -81,7 +81,7 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
         # Always restore original pause setting
         pyautogui.PAUSE = original_pause
 
-def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False):
+def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False, circles=False):
     """
     Waits for one of several possible images to appear on screen and optionally clicks it.
 
@@ -165,6 +165,9 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         humanize (bool, optional): If True, applies random offsets, randomized 
             mouse movement durations, ease-in/ease-out curves, and jittered 
             delays to simulate a human user. Defaults to False.
+            
+        circles (bool, optional): If True, moves the mouse in a slow circular motion
+            using windmouse while waiting for the image to appear. Defaults to False.
 
     Returns:
         dict: A dictionary containing the results of the search.
@@ -213,6 +216,15 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
             interrupterclicks_list = interrupterclicks + [1] * (len(interrupter_list) - len(interrupterclicks))
         else:
             interrupterclicks_list = interrupterclicks
+
+    # --- Circle Parameter Initialization ---
+    if circles:
+        circle_angle = 0
+        circle_radius = 100
+        try:
+            circle_center_x, circle_center_y = pyautogui.position()
+        except:
+            circle_center_x, circle_center_y = 500, 500
 
     # --- Main Loop ---
     while True:
@@ -374,4 +386,25 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 pyautogui.press('pagedown')
                 sleep(random.uniform(0.4, 0.7) if humanize else 0.5)
                 
-            sleep(random.uniform(0.8, 1.2) if humanize else 1)
+            if circles:
+                circle_angle += math.pi / 4  # Move 45 degrees around the circle
+                dest_x = circle_center_x + math.cos(circle_angle) * circle_radius
+                dest_y = circle_center_y + math.sin(circle_angle) * circle_radius
+                
+                try:
+                    screen_width, screen_height = pyautogui.size()
+                    dest_x = max(10, min(screen_width - 10, dest_x))
+                    dest_y = max(10, min(screen_height - 10, dest_y))
+                except:
+                    pass
+                
+                try:
+                    start_x, start_y = pyautogui.position()
+                    wind_mouse(start_x, start_y, dest_x, dest_y)
+                except pyautogui.FailSafeException:
+                    pass
+                    
+                # Small pause since wind_mouse itself contains small delays
+                sleep(random.uniform(0.1, 0.3) if humanize else 0.2)
+            else:
+                sleep(random.uniform(0.8, 1.2) if humanize else 1)

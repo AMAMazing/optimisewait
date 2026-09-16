@@ -24,7 +24,6 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
     Simulates human-like mouse movement using the WindMouse algorithm.
     Tuned for a slower, more deliberate movement speed.
     """
-    # Temporarily disable pyautogui's default pause to prevent the movement from stuttering heavily
     original_pause = pyautogui.PAUSE
     pyautogui.PAUSE = 0
     
@@ -54,7 +53,6 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
             # Limit the maximum step size (velocity magnitude)
             velo_mag = math.hypot(velo_x, velo_y)
             if velo_mag > max_step:
-                # Randomize the step slightly so speed isn't perfectly uniform
                 random_step = (max_step / 2) + random.random() * (max_step / 2)
                 velo_x = (velo_x / velo_mag) * random_step
                 velo_y = (velo_y / velo_mag) * random_step
@@ -79,7 +77,90 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
         pyautogui.moveTo(dest_x, dest_y)
         
     finally:
-        # Always restore original pause setting
+        pyautogui.PAUSE = original_pause
+
+def organic_trackpad_swirl(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
+    """
+    Simulates human-like fast oval swirling on a trackpad with dynamic breathing,
+    continuous center drift, biomechanical 2/3-power-law cadence, and Brownian motor tremor.
+    Can be called standalone or imported into other scripts.
+    """
+    try:
+        screen_w, screen_h = pyautogui.size()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+
+    if start_x is None or start_y is None:
+        try:
+            start_x, start_y = pyautogui.position()
+        except Exception:
+            start_x, start_y = screen_w // 2, screen_h // 2
+
+    base_rx = 180.0
+    base_ry = 75.0
+    base_tilt = math.radians(-15)  # Natural right-handed trackpad wrist slant
+
+    # Offset center relative to start position so there is no initial jump/teleport
+    init_rot_x = base_rx * math.cos(base_tilt)
+    init_rot_y = base_rx * math.sin(base_tilt)
+    base_center_x = max(base_rx + 20, min(screen_w - base_rx - 20, start_x - init_rot_x))
+    base_center_y = max(base_ry + 20, min(screen_h - base_ry - 20, start_y - init_rot_y))
+
+    center_drift_x = 0.0
+    center_drift_y = 0.0
+    angle = 0.0
+    tremor_x = 0.0
+    tremor_y = 0.0
+
+    original_pause = pyautogui.PAUSE
+    pyautogui.PAUSE = 0
+    start_time = time.time()
+    last_time = start_time
+
+    try:
+        while True:
+            now = time.time()
+            elapsed = now - start_time
+            if elapsed >= duration:
+                break
+
+            dt = now - last_time
+            last_time = now
+
+            # 1. Continuous center wandering
+            center_drift_x = (center_drift_x + random.uniform(-1.8, 1.8)) * 0.985
+            center_drift_y = (center_drift_y + random.uniform(-1.2, 1.2)) * 0.985
+            curr_cx = base_center_x + center_drift_x
+            curr_cy = base_center_y + center_drift_y
+
+            # 2. Dynamic oval breathing (morphs size and tilt continuously)
+            rx = base_rx + math.sin(elapsed * 2.1) * 35 + math.sin(elapsed * 0.7) * 20
+            ry = base_ry + math.cos(elapsed * 2.8) * 18 + math.cos(elapsed * 0.5) * 10
+            tilt = base_tilt + math.radians(math.sin(elapsed * 1.5) * 8)
+
+            # 3. Biomechanical 2/3-power-law speed variation
+            curvature_factor = 1.0 - 0.22 * math.cos(2 * angle)
+            angle += (base_speed * curvature_factor) * dt
+
+            # 4. Geometry calculation and rotation
+            raw_x = rx * math.cos(angle)
+            raw_y = ry * math.sin(angle)
+            rot_x = raw_x * math.cos(tilt) - raw_y * math.sin(tilt)
+            rot_y = raw_x * math.sin(tilt) + raw_y * math.cos(tilt)
+
+            # 5. Biological Brownian motor tremor
+            tremor_x = (tremor_x * 0.7) + random.uniform(-2.5, 2.5)
+            tremor_y = (tremor_y * 0.7) + random.uniform(-2.5, 2.5)
+
+            dest_x = int(round(curr_cx + rot_x + tremor_x))
+            dest_y = int(round(curr_cy + rot_y + tremor_y))
+
+            dest_x = max(10, min(screen_w - 10, dest_x))
+            dest_y = max(10, min(screen_h - 10, dest_y))
+
+            pyautogui.moveTo(dest_x, dest_y, duration=0)
+            time.sleep(random.uniform(0.002, 0.006))
+    finally:
         pyautogui.PAUSE = original_pause
 
 def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False, circles=False, max_circle_time=5.0):
@@ -101,8 +182,8 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
         interrupterclicks (int or list[int]): Number of times to click interrupters.
         interrupter_once (bool): Whether to click interrupters only once.
         humanize (bool): If True, applies random offsets and WindMouse trajectories.
-        circles (bool): If True, idly moves mouse in a wobbly human circle while waiting.
-        max_circle_time (float): Maximum seconds to circle before going totally idle.
+        circles (bool): If True, idly swirls mouse in natural, non-repeating trackpad ovals while waiting.
+        max_circle_time (float): Maximum seconds to swirl before dropping to static idle.
     """
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
@@ -130,7 +211,7 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     # --- Interrupter Parameter Normalization ---
     interrupter_list = None
     interrupterclicks_list = None
-    clicked_interrupters = set()  # Track which interrupters have been clicked
+    clicked_interrupters = set()
     
     if interrupter is not None:
         if not isinstance(interrupter, list):
@@ -148,25 +229,6 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
     # --- Circle Parameter Initialization ---
     if circles:
         circle_start_time = time.time()
-        try:
-            start_x, start_y = pyautogui.position()
-        except:
-            start_x, start_y = 500, 500
-            
-        # Define the human circle characteristics
-        circle_revolutions = random.uniform(1.5, 3.5)
-        circle_base_rx = random.randint(50, 180)
-        circle_base_ry = random.randint(50, 180)
-        circle_start_angle = random.uniform(0, 2 * math.pi)
-        
-        # Shift the center so the mouse doesn't jerk to start the circle
-        circle_center_x = start_x - circle_base_rx * math.cos(circle_start_angle)
-        circle_center_y = start_y - circle_base_ry * math.sin(circle_start_angle)
-        
-        try:
-            screen_w, screen_h = pyautogui.size()
-        except:
-            screen_w, screen_h = 1920, 1080
 
     # --- Main Loop ---
     while True:
@@ -218,13 +280,11 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                         hy = y + random.randint(-4, 4)
                         current_x, current_y = pyautogui.position()
                         
-                        # Use WindMouse for natural, curved traversal
                         wind_mouse(current_x, current_y, hx, hy)
                         
                         if int_click_count > 0:
                             sleep(random.uniform(0.1, 0.3))
                     else:
-                        # Original fast robotic movement
                         pyautogui.moveTo(x, y)
                         
                     if int_click_count > 0:
@@ -238,7 +298,7 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                     if interrupter_once:
                         clicked_interrupters.add(i)
                     
-                    break  # Exit interrupter loop to continue main flow
+                    break
 
         # --- Check for Main Images ---
         first_found_image = None
@@ -298,13 +358,11 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 hymod = ymod + random.randint(-4, 4)
                 current_x, current_y = pyautogui.position()
                 
-                # Use WindMouse for natural, curved traversal
                 wind_mouse(current_x, current_y, hxmod, hymod)
                 
                 if click_count > 0:
                     sleep(random.uniform(0.1, 0.3))
             else:
-                # Original fast robotic movement
                 pyautogui.moveTo(xmod, ymod)
                 
             if click_count > 0:
@@ -330,35 +388,17 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 
             if circles:
                 elapsed_time = time.time() - circle_start_time
-                
                 if elapsed_time < max_circle_time:
-                    # Calculate progress of the circle from 0.0 to 1.0
-                    t = elapsed_time / max_circle_time
-                    
-                    # Ease-in/ease-out timing for realistic acceleration
-                    human_t = t + (math.sin(t * math.pi * 2) * 0.05)
-                    angle = circle_start_angle + (human_t * circle_revolutions * 2 * math.pi)
-                    
-                    # Convert elapsed time into a pseudo-frame counter to create wobble noise
-                    i_equiv = elapsed_time * 60 
-                    noise_x = math.sin(i_equiv * 0.2) * 8 + random.uniform(-2, 2)
-                    noise_y = math.cos(i_equiv * 0.2) * 8 + random.uniform(-2, 2)
-                    
-                    # Determine next coordinates
-                    dest_x = circle_center_x + (circle_base_rx + noise_x) * math.cos(angle)
-                    dest_y = circle_center_y + (circle_base_ry + noise_y) * math.sin(angle)
-                    
-                    # Ensure mouse doesn't crash into monitor bounds
-                    dest_x = max(10, min(screen_w - 10, dest_x))
-                    dest_y = max(10, min(screen_h - 10, dest_y))
-                    
-                    try:
-                        # Move smoothly to the new calculated point
-                        pyautogui.moveTo(dest_x, dest_y, duration=0.05)
-                    except pyautogui.FailSafeException:
-                        pass
+                    # Swirl in responsive 0.3s bursts so image detection stays fast
+                    burst = min(0.3, max_circle_time - elapsed_time)
+                    organic_trackpad_swirl(duration=burst)
                 else:
                     # Max circle time exceeded; drop to a fully idle state
                     sleep(0.25)
             else:
                 sleep(random.uniform(0.8, 1.2) if humanize else 1)
+
+if __name__ == "__main__":
+    print('Script Started')
+    set_autopath(r'D:\optimisewait\optimisewait')
+    optimiseWait('image')

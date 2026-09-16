@@ -79,11 +79,10 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
     finally:
         pyautogui.PAUSE = original_pause
 
-def organic_trackpad_swirl(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
+def humancircles(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
     """
-    Simulates human-like fast oval swirling on a trackpad with dynamic breathing,
+    Simulates human-like fast trackpad oval swirling with dynamic breathing,
     continuous center drift, biomechanical 2/3-power-law cadence, and Brownian motor tremor.
-    Can be called standalone or imported into other scripts.
     """
     try:
         screen_w, screen_h = pyautogui.size()
@@ -100,7 +99,7 @@ def organic_trackpad_swirl(duration=5.0, start_x=None, start_y=None, base_speed=
     base_ry = 75.0
     base_tilt = math.radians(-15)  # Natural right-handed trackpad wrist slant
 
-    # Offset center relative to start position so there is no initial jump/teleport
+    # Offset center relative to starting position so cursor never jumps on start
     init_rot_x = base_rx * math.cos(base_tilt)
     init_rot_y = base_rx * math.sin(base_tilt)
     base_center_x = max(base_rx + 20, min(screen_w - base_rx - 20, start_x - init_rot_x))
@@ -133,7 +132,7 @@ def organic_trackpad_swirl(duration=5.0, start_x=None, start_y=None, base_speed=
             curr_cx = base_center_x + center_drift_x
             curr_cy = base_center_y + center_drift_y
 
-            # 2. Dynamic oval breathing (morphs size and tilt continuously)
+            # 2. Dynamic oval breathing (non-repeating ovals)
             rx = base_rx + math.sin(elapsed * 2.1) * 35 + math.sin(elapsed * 0.7) * 20
             ry = base_ry + math.cos(elapsed * 2.8) * 18 + math.cos(elapsed * 0.5) * 10
             tilt = base_tilt + math.radians(math.sin(elapsed * 1.5) * 8)
@@ -162,6 +161,9 @@ def organic_trackpad_swirl(duration=5.0, start_x=None, start_y=None, base_speed=
             time.sleep(random.uniform(0.002, 0.006))
     finally:
         pyautogui.PAUSE = original_pause
+
+# Backwards compatibility alias
+organic_trackpad_swirl = humancircles
 
 def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=0, autopath=None, altpath=None, scrolltofind=None, clickdelay=0.1, interrupter=None, interrupterclicks=1, interrupter_once=True, humanize=False, circles=False, max_circle_time=5.0):
     """
@@ -391,7 +393,7 @@ def optimiseWait(filename, dontwait=False, specreg=None, clicks=1, xoff=0, yoff=
                 if elapsed_time < max_circle_time:
                     # Swirl in responsive 0.3s bursts so image detection stays fast
                     burst = min(0.3, max_circle_time - elapsed_time)
-                    organic_trackpad_swirl(duration=burst)
+                    humancircles(duration=burst)
                 else:
                     # Max circle time exceeded; drop to a fully idle state
                     sleep(0.25)

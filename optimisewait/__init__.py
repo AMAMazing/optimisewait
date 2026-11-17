@@ -5,25 +5,33 @@ import os
 import random
 import math
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import cv2
 import numpy as np
 from PIL import Image
+
+# Prevent OpenCV's internal C++ thread pool from thrashing against our Python worker pool
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
 
 # --- Global Default Paths ---
 _default_autopath = os.getcwd()
 _default_altpath = None
 
 # --- Multi-Scale Caching, Smart Memory & Thread Safety ---
-_template_cache = {}          # Caches loaded/resized templates in RAM
+_template_cache = {}          # Caches loaded/resized templates in RAM (LRU per image)
+_stat_cache = {}              # Caches (exists, mtime) for 1s to avoid disk stat storms
 _image_scale_memory = {}      # Remembers the exact scale per image file
 _recent_scales = [1.0]        # Remembers the last 4 active scales (e.g. OS scale + Chrome zoom scale)
 
 _cache_lock = threading.Lock()
 _memory_lock = threading.Lock()
 
-# Persistent worker pool so threads aren't recreated on every scan pass
-_MAX_WORKERS = min(16, max(4, (os.cpu_count() or 4) * 2))
+# Match worker count to CPU cores to avoid oversubscription
+_MAX_WORKERS = min(8, max(2, os.cpu_count() or 4))
 _SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
 
 # Generate exact compound scales (OS DPI x Chrome Zoom presets) + uniform coarse coverage (0.40x to 2.50x)
@@ -31,7 +39,7 @@ _OS_SCALES = [1.0, 1.25, 0.80, 1.50, 0.6667, 1.75, 2.0, 0.50]
 
 
 def _build_coarse_scales():
-    """Builds a deduplicated list of compound OS x Chrome scales from 0.40x to 2.50x."""
+    """Builds a lean, deduplicated list of compound OS x Chrome scales from 0.40x to 2.50x."""
     raw = []
     for os_s in _OS_SCALES:
         for cz in [1.0, 0.90, 1.10, 0.80, 1.25, 0.75, 1.50, 0.67, 1.75, 0.50, 2.0]:
@@ -39,12 +47,13 @@ def _build_coarse_scales():
             if 0.40 <= val <= 2.50:
                 raw.append(val)
 
-    for s in np.arange(0.40, 2.52, 0.04):
+    for s in np.arange(0.40, 2.52, 0.06):
         raw.append(round(float(s), 4))
 
     deduped = []
     for s in raw:
-        if not any(abs(s - existing) < 0.015 for existing in deduped):
+        # 0.052 spacing guarantees any scale is within +-0.026 of a coarse peak (covered by Stage 3's +-0.03)
+        if not any(abs(s - existing) < 0.052 for existing in deduped):
             deduped.append(s)
     return deduped
 
@@ -88,23 +97,43 @@ def _get_fast_scales(image_path):
         return fast_scales
 
 
-def _get_cached_template(image_path, scale=1.0, grayscale=False):
-    """
-    Thread-safely loads and resizes a template image, caching it in RAM.
-    Uses INTER_AREA for shrinking (zoomed out) and INTER_LANCZOS4 for enlarging (zoomed in).
-    """
+def _get_file_mtime(image_path, ttl=1.0):
+    """Checks file existence and mtime with a short TTL cache to avoid repeated disk syscalls."""
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _stat_cache.get(image_path)
+        if cached is not None and (now - cached[0]) < ttl:
+            return cached[1]
+
     try:
         mtime = os.path.getmtime(image_path)
     except OSError:
-        return None
+        mtime = None
+
+    with _cache_lock:
+        _stat_cache[image_path] = (now, mtime)
+    return mtime
+
+
+def _get_cached_template(image_path, scale=1.0, grayscale=False):
+    """
+    Thread-safely loads and resizes a template image, caching it in RAM with LRU eviction.
+    Returns (template_array, is_flat) or (None, True).
+    """
+    mtime = _get_file_mtime(image_path)
+    if mtime is None:
+        return None, True
 
     base_key = (image_path, mtime)
     scale_key = (round(scale, 4), grayscale)
 
     with _cache_lock:
         entry = _template_cache.get(base_key)
-        if entry is not None and scale_key in entry['scaled']:
-            return entry['scaled'][scale_key]
+        if entry is not None:
+            cached_val = entry['scaled'].get(scale_key)
+            if cached_val is not None:
+                entry['scaled'].move_to_end(scale_key)
+                return cached_val
 
     if entry is None:
         try:
@@ -113,12 +142,17 @@ def _get_cached_template(image_path, scale=1.0, grayscale=False):
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         except Exception:
-            return None
+            return None, True
 
         with _cache_lock:
-            entry = _template_cache.setdefault(base_key, {'bgr': bgr, 'gray': gray, 'scaled': {}})
-            if scale_key in entry['scaled']:
-                return entry['scaled'][scale_key]
+            entry = _template_cache.setdefault(
+                base_key,
+                {'bgr': bgr, 'gray': gray, 'scaled': OrderedDict()}
+            )
+            cached_val = entry['scaled'].get(scale_key)
+            if cached_val is not None:
+                entry['scaled'].move_to_end(scale_key)
+                return cached_val
 
     src = entry['gray'] if grayscale else entry['bgr']
     if abs(scale - 1.0) < 1e-4:
@@ -127,14 +161,20 @@ def _get_cached_template(image_path, scale=1.0, grayscale=False):
         h, w = src.shape[:2]
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
-        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
         resized = cv2.resize(src, (new_w, new_h), interpolation=interp)
 
+    # Precompute flatness once when caching so match loops never recompute np.std()
+    is_flat = float(np.std(resized)) < 1.5
+    val = (resized, is_flat)
+
     with _cache_lock:
-        if len(entry['scaled']) > 90:
-            entry['scaled'].clear()
-        entry['scaled'][scale_key] = resized
-        return resized
+        scaled_dict = entry['scaled']
+        scaled_dict[scale_key] = val
+        scaled_dict.move_to_end(scale_key)
+        while len(scaled_dict) > 256:
+            scaled_dict.popitem(last=False)
+        return val
 
 
 def _capture_screen(specreg=None):
@@ -157,9 +197,53 @@ def _capture_screen(specreg=None):
     rgb = np.array(pil_shot)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    # 0.5x pyramid image makes broad multi-scale sweeps ~8x faster
-    gray_half = cv2.resize(gray, (max(1, gray.shape[1] // 2), max(1, gray.shape[0] // 2)), interpolation=cv2.INTER_AREA)
+    gray_half = cv2.resize(
+        gray,
+        (max(1, gray.shape[1] // 2), max(1, gray.shape[0] // 2)),
+        interpolation=cv2.INTER_AREA
+    )
     return bgr, gray, gray_half, offset_x, offset_y
+
+
+def _crop_screen_data(screen_data, rx1, ry1, rx2, ry2):
+    """Creates a zero-copy (plus half-res) ROI view of screen_data with updated screen offsets."""
+    screen_bgr, screen_gray, _, offset_x, offset_y = screen_data
+    roi_bgr = screen_bgr[ry1:ry2, rx1:rx2]
+    roi_gray = screen_gray[ry1:ry2, rx1:rx2]
+    roi_gray_half = cv2.resize(
+        roi_gray,
+        (max(1, roi_gray.shape[1] // 2), max(1, roi_gray.shape[0] // 2)),
+        interpolation=cv2.INTER_AREA
+    )
+    return roi_bgr, roi_gray, roi_gray_half, offset_x + rx1, offset_y + ry1
+
+
+def _compute_changed_roi(prev_gray_half, curr_gray_half, full_w, full_h, pad_px):
+    """
+    Compares 0.5x half-resolution frames to detect whether the screen changed.
+    Returns:
+      - 'unchanged': if no significant pixels changed
+      - None: if > 65% of the screen changed (scan full frame directly)
+      - (rx1, ry1, rx2, ry2): padded full-res bounding box containing all changes
+    """
+    if prev_gray_half is None or prev_gray_half.shape != curr_gray_half.shape:
+        return None
+
+    diff = cv2.absdiff(prev_gray_half, curr_gray_half)
+    _, mask = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
+    nz = cv2.findNonZero(mask)
+    if nz is None:
+        return 'unchanged'
+
+    hx, hy, hw, hh = cv2.boundingRect(nz)
+    rx1 = max(0, hx * 2 - pad_px)
+    ry1 = max(0, hy * 2 - pad_px)
+    rx2 = min(full_w, (hx + hw) * 2 + pad_px)
+    ry2 = min(full_h, (hy + hh) * 2 + pad_px)
+
+    if ((rx2 - rx1) * (ry2 - ry1)) >= (full_w * full_h * 0.65):
+        return None
+    return (rx1, ry1, rx2, ry2)
 
 
 def _effective_threshold(base_confidence, scale):
@@ -182,8 +266,8 @@ def _verify_edge_structure(screen_gray, image_path, scale, box):
     if my < 0 or mx < 0 or my + th > sh or mx + tw > sw or tw < 8 or th < 8:
         return 0.0
 
-    tmpl_gray = _get_cached_template(image_path, scale=scale, grayscale=True)
-    if tmpl_gray is None or tmpl_gray.shape[:2] != (th, tw):
+    tmpl_gray, is_flat = _get_cached_template(image_path, scale=scale, grayscale=True)
+    if tmpl_gray is None or is_flat or tmpl_gray.shape[:2] != (th, tw):
         return 0.0
 
     patch_gray = screen_gray[my:my + th, mx:mx + tw]
@@ -206,16 +290,12 @@ def _verify_edge_structure(screen_gray, image_path, scale, box):
 def _match_single_scale(screen_img, image_path, scale, grayscale):
     """Runs OpenCV template matching for a single scale and returns (score, (x, y, w, h))."""
     sh, sw = screen_img.shape[:2]
-    tmpl = _get_cached_template(image_path, scale=scale, grayscale=grayscale)
-    if tmpl is None:
+    tmpl, is_flat = _get_cached_template(image_path, scale=scale, grayscale=grayscale)
+    if tmpl is None or is_flat:
         return -1.0, None
 
     th, tw = tmpl.shape[:2]
     if th < 4 or tw < 4 or th > sh or tw > sw:
-        return -1.0, None
-
-    # Reject completely flat/blank templates to prevent false positives
-    if np.std(tmpl) < 1.5:
         return -1.0, None
 
     res = cv2.matchTemplate(screen_img, tmpl, cv2.TM_CCOEFF_NORMED)
@@ -223,6 +303,47 @@ def _match_single_scale(screen_img, image_path, scale, grayscale):
     if math.isnan(max_val) or math.isinf(max_val):
         return -1.0, None
     return float(max_val), (max_loc[0], max_loc[1], tw, th)
+
+
+def _match_gray_with_color_verify(screen_bgr, screen_gray, image_path, scale, grayscale, thresh):
+    """
+    Runs 1-channel grayscale search (~3x faster than BGR).
+    If grayscale=False, verifies 3-channel color only on the tiny matched ROI box.
+    If grayscale hit a disabled/wrong-color twin, falls back once to full BGR for accuracy.
+    """
+    g_score, g_box = _match_single_scale(screen_gray, image_path, scale, grayscale=True)
+    if grayscale or g_box is None:
+        return g_score, g_box
+
+    if g_score < (thresh - 0.07):
+        return g_score, g_box
+
+    tmpl_bgr, is_flat = _get_cached_template(image_path, scale=scale, grayscale=False)
+    if tmpl_bgr is None or is_flat:
+        return -1.0, None
+
+    sh, sw = screen_bgr.shape[:2]
+    mx, my, tw, th = g_box
+    pad = 4
+    rx1 = max(0, mx - pad)
+    ry1 = max(0, my - pad)
+    rx2 = min(sw, mx + tw + pad)
+    ry2 = min(sh, my + th + pad)
+
+    if (ry2 - ry1) < th or (rx2 - rx1) < tw:
+        return -1.0, None
+
+    patch_bgr = screen_bgr[ry1:ry2, rx1:rx2]
+    res = cv2.matchTemplate(patch_bgr, tmpl_bgr, cv2.TM_CCOEFF_NORMED)
+    _, bgr_score, _, bgr_loc = cv2.minMaxLoc(res)
+    if math.isnan(bgr_score) or math.isinf(bgr_score):
+        return -1.0, None
+
+    if bgr_score >= thresh or g_score < thresh:
+        return float(bgr_score), (rx1 + bgr_loc[0], ry1 + bgr_loc[1], tw, th)
+
+    # Rare case: grayscale strongly matched a wrong-color duplicate (e.g. greyed-out button)
+    return _match_single_scale(screen_bgr, image_path, scale, grayscale=False)
 
 
 def _format_location(offset_x, offset_y, box, specreg):
@@ -243,17 +364,18 @@ def locate_multiscale(
     multiscale=True,
     grayscale=False,
     fast_only=False,
+    skip_fast=False,
     cancel_event=None
 ):
     """
-    High-Speed Pyramid + ROI Multi-Scale Matcher with Sobel Edge Rescue.
-    Supports `cancel_event` so parallel scans abort immediately when another thread finds a match.
+    High-Speed Pyramid + ROI Multi-Scale Matcher with Grayscale-First Search & Sobel Edge Rescue.
+    Supports `fast_only`, `skip_fast` (for 2-phase scanning), and `cancel_event`.
     Returns (location, matched_scale, matched_confidence, matched_box).
     """
     if cancel_event is not None and cancel_event.is_set():
         return None, None, 0.0, None
 
-    if not os.path.exists(image_path):
+    if _get_file_mtime(image_path) is None:
         return None, None, 0.0, None
 
     if screen_data is None:
@@ -261,61 +383,67 @@ def locate_multiscale(
     else:
         screen_bgr, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
 
-    target_screen = screen_gray if grayscale else screen_bgr
-    sh, sw = target_screen.shape[:2]
+    sh, sw = screen_gray.shape[:2]
 
     if not multiscale:
-        score, box = _match_single_scale(target_screen, image_path, 1.0, grayscale)
         thresh = _effective_threshold(confidence, 1.0)
+        score, box = _match_gray_with_color_verify(
+            screen_bgr, screen_gray, image_path, 1.0, grayscale, thresh
+        )
         if box is not None and score >= thresh:
             return _format_location(offset_x, offset_y, box, specreg), 1.0, score, box
         return None, None, 0.0, None
 
-    # --- STAGE 1: Fast-Path (Per-Image Memory + Recent Active Scales) ---
     fast_scales = _get_fast_scales(image_path)
-
     best_score = -1.0
     best_match = None
     best_scale = None
 
-    for s in fast_scales:
-        if cancel_event is not None and cancel_event.is_set():
-            return None, None, 0.0, None
+    # --- STAGE 1: Fast-Path (Per-Image Memory + Recent Active Scales) ---
+    if not skip_fast:
+        for s in fast_scales:
+            if cancel_event is not None and cancel_event.is_set():
+                return None, None, 0.0, None
 
-        score, box = _match_single_scale(target_screen, image_path, s, grayscale)
-        thresh = _effective_threshold(confidence, s)
-        if box is not None and score >= thresh and score > best_score:
-            best_score, best_match, best_scale = score, box, s
-            if score >= max(thresh + 0.04, 0.90):
-                break
+            thresh = _effective_threshold(confidence, s)
+            score, box = _match_gray_with_color_verify(
+                screen_bgr, screen_gray, image_path, s, grayscale, thresh
+            )
+            if box is not None and score >= thresh and score > best_score:
+                best_score, best_match, best_scale = score, box, s
+                if score >= max(thresh + 0.04, 0.90):
+                    break
 
-    if best_match is not None:
-        # Refine +-1% inside a local ROI around the match for pinpoint box dimensions
-        if best_score < 0.94:
-            mx, my, tw, th = best_match
-            pad = max(tw, th, 48)
-            rx1, ry1 = max(0, mx - pad), max(0, my - pad)
-            rx2, ry2 = min(sw, mx + tw + pad), min(sh, my + th + pad)
-            roi_screen = target_screen[ry1:ry2, rx1:rx2]
+        if best_match is not None:
+            if best_score < 0.94:
+                mx, my, tw, th = best_match
+                pad = max(tw, th, 48)
+                rx1, ry1 = max(0, mx - pad), max(0, my - pad)
+                rx2, ry2 = min(sw, mx + tw + pad), min(sh, my + th + pad)
+                roi_bgr = screen_bgr[ry1:ry2, rx1:rx2]
+                roi_gray = screen_gray[ry1:ry2, rx1:rx2]
 
-            for micro_s in (round(best_scale - 0.01, 4), round(best_scale + 0.01, 4)):
-                if 0.40 <= micro_s <= 2.50:
-                    m_score, m_box = _match_single_scale(roi_screen, image_path, micro_s, grayscale)
-                    if m_box is not None and m_score > best_score:
-                        best_score = m_score
-                        best_scale = micro_s
-                        best_match = (rx1 + m_box[0], ry1 + m_box[1], m_box[2], m_box[3])
+                for micro_s in (round(best_scale - 0.01, 4), round(best_scale + 0.01, 4)):
+                    if 0.40 <= micro_s <= 2.50:
+                        m_thresh = _effective_threshold(confidence, micro_s)
+                        m_score, m_box = _match_gray_with_color_verify(
+                            roi_bgr, roi_gray, image_path, micro_s, grayscale, m_thresh
+                        )
+                        if m_box is not None and m_score > best_score:
+                            best_score = m_score
+                            best_scale = micro_s
+                            best_match = (rx1 + m_box[0], ry1 + m_box[1], m_box[2], m_box[3])
 
-        _remember_scale(image_path, best_scale)
-        loc = _format_location(offset_x, offset_y, best_match, specreg)
-        return loc, best_scale, best_score, best_match
+            _remember_scale(image_path, best_scale)
+            loc = _format_location(offset_x, offset_y, best_match, specreg)
+            return loc, best_scale, best_score, best_match
 
     if fast_only or (cancel_event is not None and cancel_event.is_set()):
         return None, None, 0.0, None
 
     # --- STAGE 2: Ultra-Fast 0.5x Pyramid Coarse Sweep (0.40x to 2.50x) ---
-    base_tmpl = _get_cached_template(image_path, scale=1.0, grayscale=True)
-    if base_tmpl is None:
+    base_tmpl, base_flat = _get_cached_template(image_path, scale=1.0, grayscale=True)
+    if base_tmpl is None or base_flat:
         return None, None, 0.0, None
     base_h, base_w = base_tmpl.shape[:2]
 
@@ -327,21 +455,25 @@ def locate_multiscale(
         if any(abs(s - fs) < 0.008 for fs in fast_scales):
             continue
 
-        # Use 0.5x pyramid when the scaled template is large enough (>= 24px), otherwise full-res
-        if (base_w * s >= 24) and (base_h * s >= 24) and screen_gray_half.shape[0] >= 20:
+        # Lowered threshold to 16px (>= 8px at 0.5x) so smaller icons also use the 0.5x pyramid
+        if (base_w * s >= 16) and (base_h * s >= 16) and screen_gray_half.shape[0] >= 12 and screen_gray_half.shape[1] >= 12:
             g_score, g_box = _match_single_scale(screen_gray_half, image_path, s * 0.5, grayscale=True)
             if g_box is not None and g_score > 0.0:
                 coarse_candidates.append((g_score, s, g_box[0] * 2, g_box[1] * 2))
+                if g_score >= max(confidence + 0.06, 0.92):
+                    break
         else:
             g_score, g_box = _match_single_scale(screen_gray, image_path, s, grayscale=True)
             if g_box is not None and g_score > 0.0:
                 coarse_candidates.append((g_score, s, g_box[0], g_box[1]))
+                if g_score >= max(confidence + 0.06, 0.92):
+                    break
 
     if not coarse_candidates:
         return None, None, 0.0, None
 
     coarse_candidates.sort(key=lambda x: x[0], reverse=True)
-    top_peaks = coarse_candidates[:2]
+    top_peaks = coarse_candidates[:3]
 
     if top_peaks[0][0] < (confidence - 0.18):
         return None, None, 0.0, None
@@ -358,7 +490,8 @@ def locate_multiscale(
         pad = max(est_w, est_h, 64)
         rx1, ry1 = max(0, px - pad), max(0, py - pad)
         rx2, ry2 = min(sw, px + est_w + pad), min(sh, py + est_h + pad)
-        roi_screen = target_screen[ry1:ry2, rx1:rx2]
+        roi_bgr = screen_bgr[ry1:ry2, rx1:rx2]
+        roi_gray = screen_gray[ry1:ry2, rx1:rx2]
 
         for delta in (0.0, -0.01, 0.01, -0.02, 0.02, -0.03, 0.03):
             if cancel_event is not None and cancel_event.is_set():
@@ -369,13 +502,17 @@ def locate_multiscale(
                 continue
             tested_fine.add(fine_s)
 
-            score, local_box = _match_single_scale(roi_screen, image_path, fine_s, grayscale)
+            thresh = _effective_threshold(confidence, fine_s)
+            score, local_box = _match_gray_with_color_verify(
+                roi_bgr, roi_gray, image_path, fine_s, grayscale, thresh
+            )
             if local_box is None:
-                score, global_box = _match_single_scale(target_screen, image_path, fine_s, grayscale)
+                score, global_box = _match_gray_with_color_verify(
+                    screen_bgr, screen_gray, image_path, fine_s, grayscale, thresh
+                )
             else:
                 global_box = (rx1 + local_box[0], ry1 + local_box[1], local_box[2], local_box[3])
 
-            thresh = _effective_threshold(confidence, fine_s)
             if global_box is not None:
                 if score >= thresh and score > best_score:
                     best_score = score
@@ -384,11 +521,9 @@ def locate_multiscale(
                 elif score >= (thresh - 0.06) and (borderline_candidate is None or score > borderline_candidate[0]):
                     borderline_candidate = (score, fine_s, global_box, thresh)
 
-    # Sobel Edge Rescue: if color confidence was borderline (within 6% of threshold due to display differences),
-    # verify whether the geometric edges/text outlines match strongly.
     if best_match is None and borderline_candidate is not None:
         if cancel_event is None or not cancel_event.is_set():
-            b_score, b_scale, b_box, b_thresh = borderline_candidate
+            b_score, b_scale, b_box, _ = borderline_candidate
             edge_score = _verify_edge_structure(screen_gray, image_path, b_scale, b_box)
             if edge_score >= 0.72:
                 best_score = b_score
@@ -413,6 +548,8 @@ def _scan_single_candidate(
     confidence,
     multiscale,
     grayscale,
+    fast_only,
+    skip_fast,
     cancel_event
 ):
     """Worker function that scans a single image name across autopath/altpath."""
@@ -423,7 +560,7 @@ def _scan_single_candidate(
             return None
 
         cand_path = os.path.join(folder, f"{fname}.png")
-        if not os.path.exists(cand_path):
+        if _get_file_mtime(cand_path) is None:
             continue
 
         loc, matched_scale, matched_conf, m_box = locate_multiscale(
@@ -433,6 +570,8 @@ def _scan_single_candidate(
             confidence=confidence,
             multiscale=multiscale,
             grayscale=grayscale,
+            fast_only=fast_only,
+            skip_fast=skip_fast,
             cancel_event=cancel_event
         )
         if loc is not None:
@@ -444,12 +583,14 @@ def _scan_single_candidate(
                 'location': loc,
                 'scale': matched_scale,
                 'confidence': matched_conf,
-                'box': m_box
+                'box': m_box,
+                'offset_x': screen_data[3],
+                'offset_y': screen_data[4]
             }
     return None
 
 
-def _scan_candidates_simultaneously(
+def _run_scan_phase(
     candidates,
     autopath,
     altpath,
@@ -457,21 +598,19 @@ def _scan_candidates_simultaneously(
     specreg,
     confidence,
     multiscale,
-    grayscale
+    grayscale,
+    fast_only,
+    skip_fast
 ):
-    """
-    Scans all candidate (index, filename) pairs simultaneously across worker threads.
-    As soon as a match is found, cancels remaining in-flight scans and returns the winner.
-    """
+    """Executes a single scan phase across all candidate images in parallel."""
     if not candidates:
         return None
 
-    # Fast direct call when there is only 1 image to check (avoids thread dispatch overhead)
     if len(candidates) == 1:
         idx, fname = candidates[0]
         return _scan_single_candidate(
             idx, fname, autopath, altpath, screen_data, specreg,
-            confidence, multiscale, grayscale, cancel_event=None
+            confidence, multiscale, grayscale, fast_only, skip_fast, cancel_event=None
         )
 
     cancel_event = threading.Event()
@@ -487,6 +626,8 @@ def _scan_candidates_simultaneously(
             confidence,
             multiscale,
             grayscale,
+            fast_only,
+            skip_fast,
             cancel_event
         )
         for idx, fname in candidates
@@ -501,9 +642,60 @@ def _scan_candidates_simultaneously(
     if not matches:
         return None
 
-    # If two threads matched at the exact same millisecond, prefer the earlier item in the list
     matches.sort(key=lambda m: m['index'])
     return matches[0]
+
+
+def _scan_candidates_simultaneously(
+    candidates,
+    autopath,
+    altpath,
+    screen_data,
+    specreg,
+    confidence,
+    multiscale,
+    grayscale
+):
+    """
+    2-Phase Parallel Scanner:
+      Phase 1: Checks fast/known scales for ALL candidates first so no non-matching
+               image triggers a heavy coarse sweep while another image is right on screen.
+      Phase 2: Only if Phase 1 found nothing and multiscale=True, runs coarse sweeps.
+    """
+    if not candidates:
+        return None
+
+    # Phase 1: Fast-scales-only across all candidates
+    hit = _run_scan_phase(
+        candidates, autopath, altpath, screen_data, specreg,
+        confidence, multiscale, grayscale,
+        fast_only=True, skip_fast=False
+    )
+    if hit is not None or not multiscale:
+        return hit
+
+    # Phase 2: Full multi-scale sweep across all candidates
+    return _run_scan_phase(
+        candidates, autopath, altpath, screen_data, specreg,
+        confidence, multiscale, grayscale,
+        fast_only=False, skip_fast=True
+    )
+
+
+def _max_template_extent(candidates, autopath, altpath):
+    """Estimates max scaled template dimension across candidates for safe ROI padding."""
+    max_dim = 128
+    for _, fname in candidates:
+        for folder in (autopath, altpath):
+            if folder is None:
+                continue
+            cand_path = os.path.join(folder, f"{fname}.png")
+            tmpl, _ = _get_cached_template(cand_path, scale=1.0, grayscale=True)
+            if tmpl is not None:
+                th, tw = tmpl.shape[:2]
+                max_dim = max(max_dim, int(math.ceil(max(tw, th) * 2.5)) + 32)
+                break
+    return max_dim
 
 
 def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.004, max_wait=0.009, max_step=8, target_area=10):
@@ -692,11 +884,11 @@ def optimiseWait(
     multiscale=True,
     grayscale=False,
     scale_offsets=True,
-    poll_interval=1.0
+    poll_interval=0.1
 ):
     """
     Waits for one of several possible images to appear on screen and optionally clicks it.
-    Scans all candidate images simultaneously in parallel threads against each captured frame.
+    Uses 2-phase parallel scanning, grayscale-first matching, and frame-diff ROI acceleration.
     """
     global _default_autopath, _default_altpath
     autopath = autopath if autopath is not None else _default_autopath
@@ -744,13 +936,26 @@ def optimiseWait(
         circle_start_time = time.perf_counter()
 
     main_candidates = list(enumerate(filename))
+    prev_gray_half = None
+    roi_pad = _max_template_extent(main_candidates, autopath, altpath)
 
     # --- Main Loop ---
     while True:
         loop_start = time.perf_counter()
 
         screen_data = _capture_screen(specreg)
-        _, _, _, offset_x, offset_y = screen_data
+        _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
+        sh, sw = screen_gray.shape[:2]
+
+        # Frame-diff ROI check against the previous scanned frame
+        diff_roi = _compute_changed_roi(prev_gray_half, screen_gray_half, sw, sh, roi_pad)
+
+        if diff_roi == 'unchanged':
+            scan_data = None
+        elif diff_roi is None:
+            scan_data = screen_data
+        else:
+            scan_data = _crop_screen_data(screen_data, *diff_roi)
 
         # --- Check for Interrupter Images Simultaneously ---
         if interrupter_list is not None:
@@ -760,26 +965,32 @@ def optimiseWait(
                 if not (interrupter_once and i in clicked_interrupters)
             ]
 
-            int_match = _scan_candidates_simultaneously(
-                active_interrupters,
-                autopath,
-                altpath,
-                screen_data,
-                specreg,
-                confidence,
-                multiscale,
-                grayscale
-            )
+            int_scan_data = scan_data if interrupter_once else screen_data
+            if int_scan_data is not None and active_interrupters:
+                int_match = _scan_candidates_simultaneously(
+                    active_interrupters,
+                    autopath,
+                    altpath,
+                    int_scan_data,
+                    specreg,
+                    confidence,
+                    multiscale,
+                    grayscale
+                )
+            else:
+                int_match = None
 
             if int_match is not None:
                 i = int_match['index']
                 int_findloc = int_match['location']
                 int_scale = int_match['scale']
                 int_box = int_match['box']
+                int_off_x = int_match['offset_x']
+                int_off_y = int_match['offset_y']
 
                 if int_box is not None:
-                    x = offset_x + int_box[0] + (int_box[2] / 2.0)
-                    y = offset_y + int_box[1] + (int_box[3] / 2.0)
+                    x = int_off_x + int_box[0] + (int_box[2] / 2.0)
+                    y = int_off_y + int_box[1] + (int_box[3] / 2.0)
                 elif specreg is None:
                     x, y = int_findloc
                 else:
@@ -812,20 +1023,28 @@ def optimiseWait(
                 if interrupter_once:
                     clicked_interrupters.add(i)
 
+                # Re-capture full frame after interrupter click and scan full area
                 screen_data = _capture_screen(specreg)
-                _, _, _, offset_x, offset_y = screen_data
+                _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
+                scan_data = screen_data
 
         # --- Check All Main Images Simultaneously ---
-        first_found_image = _scan_candidates_simultaneously(
-            main_candidates,
-            autopath,
-            altpath,
-            screen_data,
-            specreg,
-            confidence,
-            multiscale,
-            grayscale
-        )
+        if scan_data is not None:
+            first_found_image = _scan_candidates_simultaneously(
+                main_candidates,
+                autopath,
+                altpath,
+                scan_data,
+                specreg,
+                confidence,
+                multiscale,
+                grayscale
+            )
+        else:
+            first_found_image = None
+
+        # Record frame only after scanning it without a match
+        prev_gray_half = screen_gray_half
 
         # --- Action Phase (Immediate execution on match, ignores any remaining cycle wait) ---
         if first_found_image:
@@ -833,10 +1052,12 @@ def optimiseWait(
             found_index = first_found_image['index']
             matched_scale = first_found_image['scale']
             m_box = first_found_image['box']
+            m_off_x = first_found_image['offset_x']
+            m_off_y = first_found_image['offset_y']
 
             if m_box is not None:
-                x = offset_x + m_box[0] + (m_box[2] / 2.0)
-                y = offset_y + m_box[1] + (m_box[3] / 2.0)
+                x = m_off_x + m_box[0] + (m_box[2] / 2.0)
+                y = m_off_y + m_box[1] + (m_box[3] / 2.0)
             elif specreg is None:
                 x, y = loc
             else:
@@ -878,7 +1099,7 @@ def optimiseWait(
                 'confidence': first_found_image['confidence']
             }
 
-        # --- Loop Control & Elapsed-Time Cycle Pacing (Skips wait if scan was already slower) ---
+        # --- Loop Control & Elapsed-Time Cycle Pacing ---
         if dontwait:
             return {'found': False, 'image': None, 'location': None, 'scale': None, 'confidence': 0.0}
 

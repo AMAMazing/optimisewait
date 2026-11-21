@@ -5,6 +5,7 @@ import os
 import random
 import math
 import threading
+import ctypes
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import cv2
@@ -16,6 +17,149 @@ try:
     cv2.setNumThreads(1)
 except Exception:
     pass
+
+# --- Windows Low-Level Hardware Mouse Hook Setup (for human-interruptible circles) ---
+_WIN_HOOK_AVAILABLE = False
+if os.name == 'nt':
+    try:
+        from ctypes import wintypes
+
+        _WH_MOUSE_LL = 14
+        _WM_QUIT = 0x0012
+        _WM_MOUSEMOVE = 0x0200
+        _LLMHF_INJECTED = 0x00000001
+        _LLMHF_LOWER_IL_INJECTED = 0x00000002
+        _PM_NOREMOVE = 0x0000
+
+        _LRESULT = ctypes.c_ssize_t
+        _HOOKPROC = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        class _MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("pt", wintypes.POINT),
+                ("mouseData", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        # Dedicated WinDLL instances so argtypes/restype never collide with pyautogui
+        _user32 = ctypes.WinDLL("user32", use_last_error=True)
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        _user32.SetWindowsHookExW.argtypes = [ctypes.c_int, _HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+        _user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        _user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        _user32.CallNextHookEx.restype = _LRESULT
+        _user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+        _user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+        _user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        _user32.GetMessageW.restype = wintypes.BOOL
+        _user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+        _user32.PeekMessageW.restype = wintypes.BOOL
+        _user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        _user32.PostThreadMessageW.restype = wintypes.BOOL
+        _user32.PostQuitMessage.argtypes = [ctypes.c_int]
+        _user32.PostQuitMessage.restype = None
+        _kernel32.GetCurrentThreadId.argtypes = []
+        _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+        _WIN_HOOK_AVAILABLE = True
+    except Exception:
+        _WIN_HOOK_AVAILABLE = False
+
+
+class _HumanMouseMonitor:
+    """
+    Lightweight Windows WH_MOUSE_LL monitor that detects real physical mouse/trackpad
+    input (ignoring scripted/injected cursor moves) and immediately signals an event.
+    """
+
+    def __init__(self, stop_event=None):
+        self.human_detected = threading.Event()
+        self._stop_event = stop_event
+        self._shutdown = threading.Event()
+        self._ready = threading.Event()
+        self.hook_active = False
+        self._thread_id = None
+        self._thread = None
+        self._hook_proc_ref = None
+
+    def start(self):
+        if not _WIN_HOOK_AVAILABLE:
+            self._ready.set()
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=0.3)
+
+    def stop(self):
+        self._shutdown.set()
+        if _WIN_HOOK_AVAILABLE and self._thread_id is not None:
+            try:
+                _user32.PostThreadMessageW(self._thread_id, _WM_QUIT, 0, 0)
+            except Exception:
+                pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.5)
+
+    def _run(self):
+        self._thread_id = _kernel32.GetCurrentThreadId()
+        # Ensure this thread's message queue exists before signaling ready
+        dummy_msg = wintypes.MSG()
+        _user32.PeekMessageW(ctypes.byref(dummy_msg), None, 0, 0, _PM_NOREMOVE)
+
+        recent_move_times = []
+
+        def low_level_mouse_proc(nCode, wParam, lParam):
+            if nCode >= 0 and not self._shutdown.is_set() and not self.human_detected.is_set():
+                info = ctypes.cast(lParam, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
+                is_injected = bool(info.flags & (_LLMHF_INJECTED | _LLMHF_LOWER_IL_INJECTED))
+
+                if not is_injected:
+                    triggered = False
+                    if wParam != _WM_MOUSEMOVE:
+                        # Any physical click or scroll wheel yields control immediately
+                        triggered = True
+                    else:
+                        # Require 2+ hardware move events within 200ms to ignore 1px desk jitter
+                        now = time.monotonic()
+                        recent_move_times.append(now)
+                        cutoff = now - 0.2
+                        while recent_move_times and recent_move_times[0] < cutoff:
+                            recent_move_times.pop(0)
+                        if len(recent_move_times) >= 2:
+                            triggered = True
+
+                    if triggered:
+                        self.human_detected.set()
+                        if self._stop_event is not None:
+                            self._stop_event.set()
+                        _user32.PostQuitMessage(0)
+
+            return _user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        self._hook_proc_ref = _HOOKPROC(low_level_mouse_proc)
+        hook = _user32.SetWindowsHookExW(_WH_MOUSE_LL, self._hook_proc_ref, None, 0)
+
+        if not hook:
+            self.hook_active = False
+            self._ready.set()
+            return
+
+        self.hook_active = True
+        self._ready.set()
+
+        try:
+            msg = wintypes.MSG()
+            while not self._shutdown.is_set() and not self.human_detected.is_set():
+                ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret <= 0:
+                    break
+        finally:
+            _user32.UnhookWindowsHookEx(hook)
+            self.hook_active = False
+
 
 # --- Global Default Paths ---
 _default_autopath = os.getcwd()
@@ -752,13 +896,17 @@ def wind_mouse(start_x, start_y, dest_x, dest_y, gravity=9, wind=3, min_wait=0.0
         pyautogui.PAUSE = original_pause
 
 
-def humancircles(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
+def humancircles(duration=5.0, start_x=None, start_y=None, base_speed=16.5, stop_on_human=True, stop_event=None, _external_monitor=None):
     """
     Simulates human-like fast trackpad oval swirling with dynamic breathing,
     continuous center drift, biomechanical 2/3-power-law cadence, and Brownian motor tremor.
+
+    When `stop_on_human=True` (default), immediately stops and yields control if real
+    human mouse/trackpad movement, clicks, or scrolling are detected.
+    Returns True if interrupted early, False if completed normally.
     """
     if duration <= 0:
-        return
+        return False
 
     try:
         screen_w, screen_h = pyautogui.size()
@@ -786,17 +934,53 @@ def humancircles(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
     tremor_x = 0.0
     tremor_y = 0.0
 
+    local_stop = threading.Event()
+    owns_monitor = False
+    monitor = _external_monitor
+
+    if stop_on_human and monitor is None:
+        monitor = _HumanMouseMonitor(stop_event=local_stop)
+        monitor.start()
+        owns_monitor = True
+
+    def _is_interrupted():
+        if local_stop.is_set():
+            return True
+        if stop_event is not None and stop_event.is_set():
+            return True
+        if monitor is not None and monitor.human_detected.is_set():
+            return True
+        return False
+
     original_pause = pyautogui.PAUSE
     pyautogui.PAUSE = 0
     start_time = time.perf_counter()
     last_time = start_time
+    last_sent_x, last_sent_y = None, None
+    interrupted = False
 
     try:
         while True:
+            if _is_interrupted():
+                interrupted = True
+                break
+
             now = time.perf_counter()
             elapsed = now - start_time
             if elapsed >= duration:
                 break
+
+            # Fallback human detection if Windows low-level hook isn't active
+            if stop_on_human and (monitor is None or not monitor.hook_active) and last_sent_x is not None:
+                try:
+                    curr_x, curr_y = pyautogui.position()
+                    if math.hypot(curr_x - last_sent_x, curr_y - last_sent_y) > 15:
+                        if monitor is not None:
+                            monitor.human_detected.set()
+                        interrupted = True
+                        break
+                except Exception:
+                    pass
 
             dt = now - last_time
             last_time = now
@@ -827,10 +1011,28 @@ def humancircles(duration=5.0, start_x=None, start_y=None, base_speed=16.5):
             dest_x = max(10, min(screen_w - 10, dest_x))
             dest_y = max(10, min(screen_h - 10, dest_y))
 
+            if _is_interrupted():
+                interrupted = True
+                break
+
             pyautogui.moveTo(dest_x, dest_y, duration=0)
-            time.sleep(random.uniform(0.002, 0.006))
+            last_sent_x, last_sent_y = dest_x, dest_y
+
+            step_wait = random.uniform(0.002, 0.006)
+            if monitor is not None:
+                if monitor.human_detected.wait(timeout=step_wait):
+                    interrupted = True
+                    break
+            else:
+                if local_stop.wait(timeout=step_wait):
+                    interrupted = True
+                    break
     finally:
         pyautogui.PAUSE = original_pause
+        if owns_monitor and monitor is not None:
+            monitor.stop()
+
+    return interrupted
 
 
 # Backwards compatibility alias
@@ -880,6 +1082,7 @@ def optimiseWait(
     humanize=False,
     circles=False,
     max_circle_time=5.0,
+    stop_circles_on_human=True,
     confidence=0.84,
     multiscale=True,
     grayscale=False,
@@ -932,198 +1135,215 @@ def optimiseWait(
             interrupterclicks_list = interrupterclicks
 
     # --- Circle Parameter Initialization ---
+    circle_monitor = None
+    human_took_control = False
     if circles:
         circle_start_time = time.perf_counter()
+        if stop_circles_on_human:
+            circle_monitor = _HumanMouseMonitor()
+            circle_monitor.start()
 
     main_candidates = list(enumerate(filename))
     prev_gray_half = None
     roi_pad = _max_template_extent(main_candidates, autopath, altpath)
 
     # --- Main Loop ---
-    while True:
-        loop_start = time.perf_counter()
+    try:
+        while True:
+            loop_start = time.perf_counter()
 
-        screen_data = _capture_screen(specreg)
-        _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
-        sh, sw = screen_gray.shape[:2]
+            screen_data = _capture_screen(specreg)
+            _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
+            sh, sw = screen_gray.shape[:2]
 
-        # Frame-diff ROI check against the previous scanned frame
-        diff_roi = _compute_changed_roi(prev_gray_half, screen_gray_half, sw, sh, roi_pad)
+            # Frame-diff ROI check against the previous scanned frame
+            diff_roi = _compute_changed_roi(prev_gray_half, screen_gray_half, sw, sh, roi_pad)
 
-        if diff_roi == 'unchanged':
-            scan_data = None
-        elif diff_roi is None:
-            scan_data = screen_data
-        else:
-            scan_data = _crop_screen_data(screen_data, *diff_roi)
+            if diff_roi == 'unchanged':
+                scan_data = None
+            elif diff_roi is None:
+                scan_data = screen_data
+            else:
+                scan_data = _crop_screen_data(screen_data, *diff_roi)
 
-        # --- Check for Interrupter Images Simultaneously ---
-        if interrupter_list is not None:
-            active_interrupters = [
-                (i, int_fname)
-                for i, int_fname in enumerate(interrupter_list)
-                if not (interrupter_once and i in clicked_interrupters)
-            ]
+            # --- Check for Interrupter Images Simultaneously ---
+            if interrupter_list is not None:
+                active_interrupters = [
+                    (i, int_fname)
+                    for i, int_fname in enumerate(interrupter_list)
+                    if not (interrupter_once and i in clicked_interrupters)
+                ]
 
-            int_scan_data = scan_data if interrupter_once else screen_data
-            if int_scan_data is not None and active_interrupters:
-                int_match = _scan_candidates_simultaneously(
-                    active_interrupters,
+                int_scan_data = scan_data if interrupter_once else screen_data
+                if int_scan_data is not None and active_interrupters:
+                    int_match = _scan_candidates_simultaneously(
+                        active_interrupters,
+                        autopath,
+                        altpath,
+                        int_scan_data,
+                        specreg,
+                        confidence,
+                        multiscale,
+                        grayscale
+                    )
+                else:
+                    int_match = None
+
+                if int_match is not None:
+                    i = int_match['index']
+                    int_findloc = int_match['location']
+                    int_scale = int_match['scale']
+                    int_box = int_match['box']
+                    int_off_x = int_match['offset_x']
+                    int_off_y = int_match['offset_y']
+
+                    if int_box is not None:
+                        x = int_off_x + int_box[0] + (int_box[2] / 2.0)
+                        y = int_off_y + int_box[1] + (int_box[3] / 2.0)
+                    elif specreg is None:
+                        x, y = int_findloc
+                    else:
+                        x = int_findloc.left + int_findloc.width / 2.0
+                        y = int_findloc.top + int_findloc.height / 2.0
+
+                    int_click_count = interrupterclicks_list[i]
+
+                    if humanize:
+                        jx, jy = _safe_jitter(int_scale, int_box)
+                        hx = x + random.randint(-jx, jx)
+                        hy = y + random.randint(-jy, jy)
+                        current_x, current_y = pyautogui.position()
+
+                        wind_mouse(current_x, current_y, hx, hy)
+
+                        if int_click_count > 0:
+                            sleep(random.uniform(0.1, 0.3))
+                    else:
+                        pyautogui.moveTo(int(round(x)), int(round(y)))
+
+                    if int_click_count > 0:
+                        for _ in range(int_click_count):
+                            pyautogui.click()
+                            if humanize:
+                                sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
+                            else:
+                                sleep(clickdelay)
+
+                    if interrupter_once:
+                        clicked_interrupters.add(i)
+
+                    # Re-capture full frame after interrupter click and scan full area
+                    screen_data = _capture_screen(specreg)
+                    _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
+                    scan_data = screen_data
+
+            # --- Check All Main Images Simultaneously ---
+            if scan_data is not None:
+                first_found_image = _scan_candidates_simultaneously(
+                    main_candidates,
                     autopath,
                     altpath,
-                    int_scan_data,
+                    scan_data,
                     specreg,
                     confidence,
                     multiscale,
                     grayscale
                 )
             else:
-                int_match = None
+                first_found_image = None
 
-            if int_match is not None:
-                i = int_match['index']
-                int_findloc = int_match['location']
-                int_scale = int_match['scale']
-                int_box = int_match['box']
-                int_off_x = int_match['offset_x']
-                int_off_y = int_match['offset_y']
+            # Record frame only after scanning it without a match
+            prev_gray_half = screen_gray_half
 
-                if int_box is not None:
-                    x = int_off_x + int_box[0] + (int_box[2] / 2.0)
-                    y = int_off_y + int_box[1] + (int_box[3] / 2.0)
+            # --- Action Phase (Immediate execution on match, ignores any remaining cycle wait) ---
+            if first_found_image:
+                loc = first_found_image['location']
+                found_index = first_found_image['index']
+                matched_scale = first_found_image['scale']
+                m_box = first_found_image['box']
+                m_off_x = first_found_image['offset_x']
+                m_off_y = first_found_image['offset_y']
+
+                if m_box is not None:
+                    x = m_off_x + m_box[0] + (m_box[2] / 2.0)
+                    y = m_off_y + m_box[1] + (m_box[3] / 2.0)
                 elif specreg is None:
-                    x, y = int_findloc
+                    x, y = loc
                 else:
-                    x = int_findloc.left + int_findloc.width / 2.0
-                    y = int_findloc.top + int_findloc.height / 2.0
+                    x = loc.left + loc.width / 2.0
+                    y = loc.top + loc.height / 2.0
 
-                int_click_count = interrupterclicks_list[i]
+                offset_mult = matched_scale if scale_offsets else 1.0
+                xmod = x + (xoff[found_index] * offset_mult)
+                ymod = y + (yoff[found_index] * offset_mult)
+
+                click_count = clicks[found_index]
 
                 if humanize:
-                    jx, jy = _safe_jitter(int_scale, int_box)
-                    hx = x + random.randint(-jx, jx)
-                    hy = y + random.randint(-jy, jy)
+                    jx, jy = _safe_jitter(matched_scale, m_box)
+                    hxmod = xmod + random.randint(-jx, jx)
+                    hymod = ymod + random.randint(-jy, jy)
                     current_x, current_y = pyautogui.position()
 
-                    wind_mouse(current_x, current_y, hx, hy)
+                    wind_mouse(current_x, current_y, hxmod, hymod)
 
-                    if int_click_count > 0:
+                    if click_count > 0:
                         sleep(random.uniform(0.1, 0.3))
                 else:
-                    pyautogui.moveTo(int(round(x)), int(round(y)))
+                    pyautogui.moveTo(int(round(xmod)), int(round(ymod)))
 
-                if int_click_count > 0:
-                    for _ in range(int_click_count):
+                if click_count > 0:
+                    for _ in range(click_count):
                         pyautogui.click()
                         if humanize:
                             sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
                         else:
                             sleep(clickdelay)
 
-                if interrupter_once:
-                    clicked_interrupters.add(i)
+                return {
+                    'found': True,
+                    'image': first_found_image['filename'],
+                    'location': loc,
+                    'scale': matched_scale,
+                    'confidence': first_found_image['confidence']
+                }
 
-                # Re-capture full frame after interrupter click and scan full area
-                screen_data = _capture_screen(specreg)
-                _, screen_gray, screen_gray_half, offset_x, offset_y = screen_data
-                scan_data = screen_data
+            # --- Loop Control & Elapsed-Time Cycle Pacing ---
+            if dontwait:
+                return {'found': False, 'image': None, 'location': None, 'scale': None, 'confidence': 0.0}
 
-        # --- Check All Main Images Simultaneously ---
-        if scan_data is not None:
-            first_found_image = _scan_candidates_simultaneously(
-                main_candidates,
-                autopath,
-                altpath,
-                scan_data,
-                specreg,
-                confidence,
-                multiscale,
-                grayscale
-            )
-        else:
-            first_found_image = None
-
-        # Record frame only after scanning it without a match
-        prev_gray_half = screen_gray_half
-
-        # --- Action Phase (Immediate execution on match, ignores any remaining cycle wait) ---
-        if first_found_image:
-            loc = first_found_image['location']
-            found_index = first_found_image['index']
-            matched_scale = first_found_image['scale']
-            m_box = first_found_image['box']
-            m_off_x = first_found_image['offset_x']
-            m_off_y = first_found_image['offset_y']
-
-            if m_box is not None:
-                x = m_off_x + m_box[0] + (m_box[2] / 2.0)
-                y = m_off_y + m_box[1] + (m_box[3] / 2.0)
-            elif specreg is None:
-                x, y = loc
+            if scrolltofind in ('pageup', 'pagedown'):
+                pyautogui.press(scrolltofind)
+                scroll_target = random.uniform(0.4, 0.7) if humanize else 0.5
             else:
-                x = loc.left + loc.width / 2.0
-                y = loc.top + loc.height / 2.0
+                scroll_target = 0.0
 
-            offset_mult = matched_scale if scale_offsets else 1.0
-            xmod = x + (xoff[found_index] * offset_mult)
-            ymod = y + (yoff[found_index] * offset_mult)
+            if circles:
+                if circle_monitor is not None and circle_monitor.human_detected.is_set():
+                    human_took_control = True
 
-            click_count = clicks[found_index]
+                circle_elapsed = time.perf_counter() - circle_start_time
+                within_budget = (max_circle_time is None) or (circle_elapsed < max_circle_time)
+                should_circle = within_budget and not human_took_control
 
-            if humanize:
-                jx, jy = _safe_jitter(matched_scale, m_box)
-                hxmod = xmod + random.randint(-jx, jx)
-                hymod = ymod + random.randint(-jy, jy)
-                current_x, current_y = pyautogui.position()
+                target_cycle = max(scroll_target, 0.3 if should_circle else 0.25)
+                deadline = loop_start + target_cycle
+                remaining = deadline - time.perf_counter()
 
-                wind_mouse(current_x, current_y, hxmod, hymod)
-
-                if click_count > 0:
-                    sleep(random.uniform(0.1, 0.3))
-            else:
-                pyautogui.moveTo(int(round(xmod)), int(round(ymod)))
-
-            if click_count > 0:
-                for _ in range(click_count):
-                    pyautogui.click()
-                    if humanize:
-                        sleep(max(0, clickdelay + random.uniform(-0.03, 0.08)))
+                if remaining > 0:
+                    if should_circle:
+                        circle_dur = remaining if max_circle_time is None else min(remaining, max_circle_time - circle_elapsed)
+                        if humancircles(duration=circle_dur, stop_on_human=stop_circles_on_human, _external_monitor=circle_monitor):
+                            human_took_control = True
                     else:
-                        sleep(clickdelay)
-
-            return {
-                'found': True,
-                'image': first_found_image['filename'],
-                'location': loc,
-                'scale': matched_scale,
-                'confidence': first_found_image['confidence']
-            }
-
-        # --- Loop Control & Elapsed-Time Cycle Pacing ---
-        if dontwait:
-            return {'found': False, 'image': None, 'location': None, 'scale': None, 'confidence': 0.0}
-
-        if scrolltofind in ('pageup', 'pagedown'):
-            pyautogui.press(scrolltofind)
-            scroll_target = random.uniform(0.4, 0.7) if humanize else 0.5
-        else:
-            scroll_target = 0.0
-
-        if circles:
-            circle_elapsed = time.perf_counter() - circle_start_time
-            target_cycle = max(scroll_target, 0.3 if circle_elapsed < max_circle_time else 0.25)
-            deadline = loop_start + target_cycle
-            remaining = deadline - time.perf_counter()
-
-            if remaining > 0:
-                if circle_elapsed < max_circle_time:
-                    humancircles(duration=min(remaining, max_circle_time - circle_elapsed))
-                else:
-                    _wait_until(deadline)
-        else:
-            base_wait = poll_interval * random.uniform(0.8, 1.2) if humanize else poll_interval
-            target_cycle = max(scroll_target, base_wait)
-            _wait_until(loop_start + target_cycle)
+                        _wait_until(deadline)
+            else:
+                base_wait = poll_interval * random.uniform(0.8, 1.2) if humanize else poll_interval
+                target_cycle = max(scroll_target, base_wait)
+                _wait_until(loop_start + target_cycle)
+    finally:
+        if circle_monitor is not None:
+            circle_monitor.stop()
 
 
 if __name__ == "__main__":
